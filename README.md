@@ -312,9 +312,10 @@ glab auth login --hostname gitlab.example.com
 glab auth status --hostname gitlab.example.com
 ```
 
-로그인한 사용자와 프로젝트 ID는 다음처럼 확인합니다. Windows PowerShell:
+로그인한 사용자와 프로젝트 ID는 다음처럼 확인합니다. Windows PowerShell에서는 한글이 포함된 API 응답을 UTF-8로 읽도록 먼저 콘솔 출력 인코딩을 설정합니다. 이 설정은 현재 터미널 세션에 적용됩니다.
 
 ```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 glab api user --hostname gitlab.example.com | ConvertFrom-Json | Select-Object id, username
 glab api projects/group%2Frepository --hostname gitlab.example.com | ConvertFrom-Json | Select-Object id, path_with_namespace
 ```
