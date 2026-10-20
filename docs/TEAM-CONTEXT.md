@@ -40,6 +40,8 @@ MCP 프로세스를 시작하기 전에 `.env.example`에 나열한 Jira 환경�
 | `team_member_context` | 저장된 개인별 이슈와 마지막 성공/실패 시각 조회. `nextOffset`으로 페이지 이동 |
 | `team_weekly_summary` | 등록 팀원을 갱신하고 가장 최근 실행 대상 월요일의 주간 파일 생성/재생성 |
 | `review_context_prepare` | `mr_url`의 작성자·SHA·변경 경로·연결 Jira를 조회하고 등록 팀원의 최신 리뷰 맥락 반환 |
+| `review_context_complete` | 준비한 MR·SHA·맥락 버전의 리뷰 완료 기록을 근거와 함께 비공개 저장 |
+| `review_history_list` | 같은 MR·Jira키·정확한 변경 파일에 해당하는 누적 기록을 페이지별 조회 |
 
 주간 요약과 리뷰 준비에는 등록된 팀원이 1명 이상 필요하며, 0명이면 시작하지 않습니다. `team_sync`는 등록된 팀원을 대상으로 실행합니다. 일부 조회 실패는 작업 없음으로 취급하지 않으며 이전 기록을 보존합니다. 최신 정보가 필요한 리뷰 준비와 주간 요약은 등록 팀원의 전체 갱신이 성공해야 진행합니다.
 
@@ -63,13 +65,57 @@ MCP 서버 안의 타이머가 1분마다 실행 시점을 확인합니다. 팀�
 
 ## 리뷰에 사용하는 방법
 
-먼저 `review_context_prepare({"mr_url":"https://gitlab.example/group/project/-/merge_requests/123"})`를 호출합니다. GitLab 조회에는 해당 호스트에 로그인한 `glab`이 필요합니다. MR 제목·설명·소스 브랜치의 Jira키, 현재 SHA, 변경 파일의 이전/새 경로를 읽습니다. 이후 등록 팀원의 Jira 정보와 연결 이슈를 갱신하고 끝에 GitLab SHA를 다시 확인합니다.
+먼저 `review_context_prepare({"mr_url":"https://gitlab.example/group/project/-/merge_requests/123","jira_keys":["TEAM-123"]})`를 호출합니다. `jira_keys`는 선택 인수입니다. GitLab 조회에는 해당 호스트에 로그인한 `glab`이 필요합니다. MR 제목·설명·소스 브랜치의 Jira키와 명시한 키를 합치고, 현재 SHA와 변경 파일의 이전/새 경로를 읽습니다. 이후 등록 팀원의 Jira 정보와 연결 이슈를 갱신하고 끝에 GitLab SHA를 다시 확인합니다. MR 양식은 그대로 사용하며 키가 없을 때만 도구 인수로 연결해도 됩니다.
 
 반환값은 작성자, 변경 경로가 담당 범위에 포함되는 사람, 그 외 배경 관점 순서입니다. `teamMemberIds`에는 준비 당시 등록 팀원 ID 목록을 담아 관점 누락을 확인할 수 있습니다. 모든 관점에 담당 영역·검토 초점·Jira 작업이 포함됩니다. 작성자/영향 관점은 최대 12개, 배경 관점은 최대 3개 작업을 우선 전달하며 생략 수를 표시합니다. 추가 작업은 `team_member_context`로 조회합니다. 도구 응답의 개인별 설명은 2,000자, 연결 이슈 설명은 8,000자, 변경 이력은 최근 20개까지 전달하며 생략을 명시합니다. 원본 전체는 비공개 이슈 기록과 Jira 출처에 보관됩니다. 연결 이슈가 20개를 초과하면 준비를 중단합니다. 경로가 일치하지 않는다는 사실만으로 업무 간 영향이 없다고 단정하지 않습니다.
 
 리뷰를 수행하는 대화는 이 자료를 코드와 함께 읽고 완료 조건·API 계약·담당 영역 간 영향을 확인합니다. 공개 리뷰의 `작업 맥락`에는 실제 사용한 Jira키나 담당 영역의 근거를 적습니다. 개인별 전체 업무 목록과 로컬 파일 경로는 댓글에 복사하지 않습니다. 연결 Jira가 없으면 완료 조건 판단을 보류하고 코드에서 확인한 결함을 검토합니다.
 
-기존 `mr-review`의 prepare 단계에도 같은 준비 함수를 연결했습니다. 새로 준비한 상태는 record 단계에서 작업 맥락 근거를 요구하고, post 단계에서 GitLab SHA가 달라졌으면 게시를 차단합니다. 새 MCP의 `review_context_prepare` 자체는 모델을 별도로 실행하거나 댓글·알림을 보내지 않습니다. 수신함→리뷰→게시의 전체 자동 처리 연결은 다음 단계입니다.
+기존 `mr-review`의 prepare 단계에도 같은 준비 함수를 연결했습니다. 새로 준비한 상태는 record 단계에서 작업 맥락 근거와 `--memory-file <내부JSON>`을 요구하고, post 단계에서 GitLab SHA가 달라졌으면 게시를 차단합니다. 새 MCP의 `review_context_prepare` 자체는 모델을 별도로 실행하거나 댓글·알림을 보내지 않습니다. 수신함→리뷰→게시의 전체 자동 처리 연결은 다음 단계입니다.
+
+## 리뷰 완료 기록과 재사용
+
+리뷰를 수행하는 대화가 기존 MR·댓글·코드·Jira·테스트를 근거로 내부 JSON을 작성합니다. 준비 응답과 Markdown의 `mrSource`에는 MR 제목 최대 512자, 설명 최대 16,000자와 `descriptionTruncated`가 포함됩니다. MCP 준비 도구는 댓글을 자동 수집하지 않으며 리뷰를 수행하는 대화가 별도로 확인합니다. 기존 CLI가 반환하는 `authorNotes`도 근거로 사용할 수 있습니다. MR 템플릿에 새 필수 항목을 추가하지 않습니다. 예를 들어 이유와 검증이 확인되지 않았다면 `review_context_complete`를 다음처럼 호출합니다. `<준비 결과의 ...>`는 실제 준비 응답의 값으로 바꿉니다.
+
+```json
+{
+  "mr_url": "https://gitlab.example/group/project/-/merge_requests/123",
+  "head_sha": "<준비 결과의 headSha>",
+  "context_version": "<준비 결과의 contextVersion>",
+  "verdict": "approve",
+  "memory": {
+    "implementation": [{
+      "summary": "입력 검증을 공통 함수에서 수행함을 확인",
+      "basis": "observed",
+      "evidence": [{"kind": "code", "ref": "src/validation.js:10 @ <검토한SHA>"}]
+    }],
+    "decisions": [{
+      "decision": "공통 검증 함수 사용",
+      "reason": null,
+      "basis": "unknown",
+      "evidence": []
+    }],
+    "validations": [{
+      "check": "회귀 테스트 실행",
+      "result": "not_run",
+      "basis": "unknown",
+      "evidence": []
+    }],
+    "remainingWork": []
+  }
+}
+```
+
+- 네 배열은 모두 필수이며 `implementation`에는 1개 이상이 필요합니다. 각 배열은 최대 30개, 항목의 텍스트는 2,000자, 근거는 최대 10개, 근거 `ref`는 2,048자입니다. 정규화한 메모리 전체는 UTF-8 JSON 기준 64KiB를 넘을 수 없습니다.
+- `basis`는 직접 확인한 `observed`, 출처에 적힌 진술인 `reported`, 미확인인 `unknown`입니다. `observed`와 `reported`에는 근거가 필요합니다. `evidence.kind`는 `code`, `mr_description`, `mr_comment`, `jira`, `test` 중 하나입니다. 근거 위치는 검토한 SHA·댓글·테스트 실행을 식별할 수 있게 적습니다. 서버가 근거 내용 자체를 검증하는 것은 아닙니다.
+- 결정 이유가 확인되지 않으면 `reason: null`로 남깁니다. 이유를 적으려면 `reported`와 MR 설명·댓글 또는 Jira 진술의 출처가 필요합니다. 코드 모양만 보고 작성자의 의도를 만들지 않습니다.
+- 검증 `result`는 `passed`, `failed`, `not_run`, `unknown`입니다. 직접 확인한 성공/실패에는 `test` 근거가 필요하며 출처가 전한 결과는 직접 실행한 결과와 구분합니다.
+
+`review_context_complete`는 준비한 맥락 버전과 GitLab의 현재 SHA가 일치할 때만 저장합니다. 같은 내용을 다시 저장하면 기존 기록을 반환하고, 다른 SHA의 리뷰는 별도 기록으로 누적합니다. 연결 Jira키·작성자·변경 경로는 준비한 맥락에서 가져오며 완료 호출에서 임의 이슈를 추가하지 않습니다. Jira 연결이 없으면 MR·SHA와 변경 파일 기준으로 보관합니다. 저장은 Jira 상태 변경·댓글 게시·승인·머지를 실행하지 않으며 `stage: reviewed`는 로컬 리뷰 기록 완료를 뜻합니다.
+
+다음 준비의 `reviewHistory`는 같은 MR **또는** 연결 Jira키 **또는** 같은 GitLab 호스트·프로젝트의 정확히 같은 변경 파일에 해당하는 최신 기록을 최대 10개·100,000 JSON 문자까지 전달합니다. 명시적으로 연결한 Jira키는 다른 저장소의 기록도 연결할 수 있습니다. 메모리 항목 중간은 자르지 않으며 자동 응답에서는 변경 경로 색인만 생략합니다. `records`, `total`, `offset`, `nextOffset`, `omittedRecordCount`를 확인합니다. 더 필요한 기록은 응답의 `nextOffset`을 사용해 `review_history_list({"mr_url":"...","jira_keys":["TEAM-123"],"changed_paths":["src/validation.js"],"offset":10,"limit":20})`로 조회하며, `limit`은 최대 100입니다. 조건은 OR로 합쳐집니다. 수동 조회도 `mr_url`을 제공하면 경로 조건을 해당 호스트·프로젝트로 제한하고, 생략하면 전체 저장소의 경로를 검색합니다. 조건 없이 호출하면 전체 비공개 기록을 조회합니다.
+
+이전 기록은 당시 SHA에서 확인한 자료입니다. 현재 요구·코드와 다시 대조하고 `unknown`·`reason: null`을 확인된 사실로 바꾸지 않습니다. 남은 작업은 새 근거 없이 자동 해결 처리하지 않습니다. Jira 최신화는 누적 리뷰 기록을 지우지 않습니다. 공개 댓글에는 관련 결론과 근거만 옮기고 내부 JSON·개인별 업무 내역을 그대로 복사하지 않습니다.
 
 ## 저장과 검증 범위
 
@@ -79,11 +125,13 @@ MCP 서버 안의 타이머가 1분마다 실행 시점을 확인합니다. 팀�
   people/<id>/profile.md
   people/<id>/weeks/<월요일>.md
   issues/<Jira키>/context.md
+  issues/<Jira키>/review-history.md
   reviews/<MR URL 해시>/<SHA>.md
+  reviews/<MR URL 해시>/history/<기록ID>.md
 ```
 
-SQLite가 원본이며 Markdown은 읽기 위한 파일입니다. Jira 이슈 원본은 개인 폴더에 복제하지 않으며 담당 변경 시에도 같은 키를 유지합니다. 모든 설명과 MR 내용은 검토 자료이며 도구 실행 지시로 취급하지 않습니다.
+SQLite가 원본이며 Markdown은 읽기 위한 파일입니다. Jira 이슈 원본은 개인 폴더에 복제하지 않으며 담당 변경 시에도 같은 키를 유지합니다. 누적 리뷰 원문은 `reviews/.../history/`에 한 번 보관하고 이슈의 `review-history.md`에는 링크만 둡니다. 모든 설명과 MR 내용은 검토 자료이며 도구 실행 지시로 취급하지 않습니다.
 
 가상 계정과 모의 Jira/GitLab 응답으로 등록·페이지 순회·이력·요약·준비 실패·SHA 변경·리뷰 단계 연결을 검증합니다. 운영 계정은 아직 연결하지 않았습니다. 계정 권한 때문에 Jira 검색 결과에서 제외되는 자료는 API 결과만으로 식별할 수 없습니다. 현재 조회 상한은 개인별 500개 이슈, 검색/이력 각 50페이지이며 한도를 넘으면 성공으로 처리하지 않습니다. 최초 전체 이력 동기화는 오래 걸릴 수 있어 MCP 도구 제한 시간을 300초로 설정했습니다.
 
-2026-10-20 전체 검증: `npm test` 141개 중 140개 통과, 실패 0개, Windows 파일 심볼릭 링크 권한이 필요한 1개 생략. `npm run smoke`의 도구 30개와 `npm run smoke:review`도 통과했습니다. 실제 loopback Jira HTTP 서버를 사용한 통합 테스트에서 조회 → 주간 파일 → 등록 팀원의 관점 → Jira 변경 후 새 맥락 버전을 확인했습니다. 앱 등록·운영 계정·실제 댓글 게시와 운영 환경에서의 최초 동기화 시간은 아직 확인하지 않았습니다.
+2026-10-20 전체 검증: `npm test` 164개 중 163개 통과, 실패 0개, Windows 파일 심볼릭 링크 권한이 필요한 1개 생략. `npm run smoke`의 도구 32개와 `npm run smoke:review`도 통과했습니다. 실제 loopback Jira HTTP 서버를 사용한 통합 테스트에서 조회 → 주간 파일 → 등록 팀원의 관점 → Jira 변경 후 새 맥락 버전을 확인했습니다. 누적 기록은 실제 stdio MCP 호출과 임시 SQLite에서 완료 저장·재시도 중복 방지·실패 차단·다음 리뷰 재참조·조회 한도·저장소 범위를 검증했습니다. 앱 등록·운영 계정·실제 댓글 게시와 운영 환경에서의 최초 동기화 시간은 아직 확인하지 않았습니다.

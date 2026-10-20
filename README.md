@@ -1,6 +1,6 @@
 # Review Bot for SSAFY
 
-GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하기 위한 로컬 MCP 서버입니다. 팀원별 담당 영역·작업 이력을 보관하고, 리뷰 직전에 최신 자료를 모아 리뷰를 수행하는 대화에 전달합니다. Mattermost 메시지 관리·전송과 GitLab 웹훅 수신함도 제공합니다.
+GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하기 위한 로컬 MCP 서버입니다. 팀원별 담당 영역·작업 이력을 보관하고, 리뷰 직전에 최신 자료를 모아 리뷰를 수행하는 대화에 전달합니다. 리뷰를 마치면 구현 방식·결정 이유·검증·남은 작업을 비공개로 누적해 다음 리뷰에 자동 참조합니다. Mattermost 메시지 관리·전송과 GitLab 웹훅 수신함도 제공합니다.
 
 이 프로젝트는 [kdHyeok/MMP](https://github.com/kdHyeok/MMP/tree/943ae776026daa4ec8d230f0fb65ddd35ea8c6f2)를 확장했습니다. 호환성을 위해 패키지·플러그인 이름 `mmp`를 유지합니다. 확장 소스는 [baekseunghak/Review-Bot-For-SSAFY](https://github.com/baekseunghak/Review-Bot-For-SSAFY)에서 받으세요. 원본 MMP만 설치하면 새 Jira·수신함 도구가 포함되지 않습니다.
 
@@ -30,7 +30,7 @@ GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하�
 
 | 기능 | 현재 상태 |
 |---|---|
-| 로컬 stdio MCP | 구현됨. 도구 30개 제공 |
+| 로컬 stdio MCP | 구현됨. 도구 32개 제공 |
 | Mattermost 웹훅·채널·사람·템플릿 관리와 메시지 전송 | 구현됨. 실제 전송에는 별도 설정 필요 |
 | GitLab 웹훅 수신·인증·중복 제거·SQLite 수신함 | 구현됨. 별도 수신 프로세스 실행 필요 |
 | MR 설명 멘션·댓글 멘션·리뷰어 지정 감지 | 구현됨. 지정한 계정과 허용 프로젝트에 적용 |
@@ -39,6 +39,8 @@ GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하�
 | Jira 현재/과거 담당 작업과 상태·담당자 이력 수집 | 구현됨. Jira Cloud REST API v3 사용 |
 | 개인별 월요일 요약과 재시작 보충 실행 | 구현됨. MCP 프로세스 생존 필요 |
 | 리뷰 직전 MR·Jira 최신화와 등록 팀원의 관점 구성 | 구현됨. `review_context_prepare` 사용 |
+| 리뷰 완료 시 구현·결정 이유·검증·남은 작업 누적 | 구현됨. `review_context_complete`로 비공개 저장 |
+| 다음 리뷰에서 관련 누적 기록 자동 참조 | 구현됨. 준비 응답의 `reviewHistory`, 추가 조회는 `review_history_list` |
 | 새 수신함 → 모델 리뷰 → MR 댓글 → Mattermost 전체 자동 처리 | 아직 연결되지 않음 |
 | 새 수신함의 5분 API 폴링·웹훅 누락 복구 | 아직 구현되지 않음 |
 | 공개 HTTPS 수신 주소·호스팅·상시 서비스 설치 | 사용자가 별도 준비 |
@@ -117,7 +119,7 @@ npm run smoke:review
 | 명령 | 확인하는 것 |
 |---|---|
 | `npm test` | 원본 기능, Jira·팀 저장소·주간 요약·리뷰 단계, 로컬 HTTP/stdio 통합 |
-| `npm run smoke` | 별도 stdio 프로세스의 도구 30개와 기본 호출 |
+| `npm run smoke` | 별도 stdio 프로세스의 도구 32개와 기본 호출 |
 | `npm run smoke:review` | 인증된 가상 웹훅 → SQLite → stdio 조회, 중복과 새 커밋 |
 
 테스트는 임시 데이터와 모의 응답을 사용합니다. 운영 GitLab·Jira·Mattermost에 댓글·메시지를 보내지 않습니다. Windows에서 파일 심볼릭 링크 권한이 없으면 해당 검사 1개가 생략될 수 있습니다.
@@ -409,19 +411,22 @@ MCP 서버가 **1분마다** 월요일 **09:00 Asia/Seoul** 실행 시점을 확
 
 ```json
 {
-  "mr_url": "https://gitlab.example.com/group/repository/-/merge_requests/42"
+  "mr_url": "https://gitlab.example.com/group/repository/-/merge_requests/42",
+  "jira_keys": ["TEAM-123"]
 }
 ```
 
 도구는 다음 정보를 준비합니다.
 
 1. GitLab의 현재 작성자·커밋 SHA·전체 변경 경로를 조회합니다. 파일 이름 변경 전/후 경로도 포함합니다.
-2. MR 제목·설명·소스 브랜치에서 Jira키를 찾습니다.
+2. MR 제목·설명·소스 브랜치에서 찾은 Jira키와 선택 인수 `jira_keys`를 합칩니다.
 3. 등록된 팀원들의 현재/과거 담당 작업과 연결 이슈를 새로 조회합니다.
 4. 작성자 → 변경 경로 담당자 → 나머지 배경 관점 순으로 등록 팀원의 관점을 구성합니다.
 5. 마지막에 MR SHA를 다시 확인합니다. 준비 중 새 커밋이 생기면 중단합니다.
 
-반환값의 `status`, `headSha`, `preparedAt`, `teamMemberIds`, `relatedIssues`, `perspectives`, `warnings`와 맥락 파일 `path`를 확인합니다. `teamMemberIds`는 준비 당시 등록 팀원 ID 목록이며 관점에서 빠진 팀원이 없는지 확인하는 기준입니다. 작성자 계정이 등록되어 있지 않거나 Jira 갱신이 실패하면 준비되지 않습니다. 이전 주간 요약으로 최신화를 대신하지 않습니다.
+반환값의 `status`, `headSha`, `contextVersion`, `preparedAt`, `teamMemberIds`, `relatedIssues`, `perspectives`, `mrSource`, `reviewHistory`, `warnings`와 맥락 파일 `path`를 확인합니다. `teamMemberIds`는 준비 당시 등록 팀원 ID 목록이며 관점에서 빠진 팀원이 없는지 확인하는 기준입니다. `mrSource`에는 기존 MR 제목(최대 512자)·설명(최대 16,000자)과 설명 생략 여부가 담깁니다. 댓글은 이 MCP 도구가 자동 수집하지 않으므로 리뷰를 수행하는 대화가 별도로 확인합니다. 작성자 계정이 등록되어 있지 않거나 Jira 갱신이 실패하면 준비되지 않습니다. 이전 주간 요약으로 최신화를 대신하지 않습니다.
+
+**MR 양식을 바꿔야 하나요?** 기존 양식을 그대로 사용합니다. MR 어디에도 Jira키가 없으면 필요한 키를 선택 인수 `jira_keys`로 전달할 수 있습니다. 연결 키가 없으면 임의 이슈를 추측하지 않고 MR·SHA와 변경 파일 경로를 기준으로 리뷰 기록을 보관합니다.
 
 ### 11-2. 실제 리뷰 요청 예시
 
@@ -430,13 +435,25 @@ MCP 서버가 **1분마다** 월요일 **09:00 Asia/Seoul** 실행 시점을 확
 먼저 review_context_prepare로 최신 작업 맥락을 준비하고,
 등록된 팀원의 담당 영역과 Jira 작업을 확인해 코드·호출부·API 계약을 검토해줘.
 리뷰의 '작업 맥락'에는 실제 사용한 Jira키나 담당 영역 근거를 적어줘.
+리뷰를 마치면 확인한 구현 방식·결정 이유·검증·남은 작업을 근거와 함께
+review_context_complete로 비공개 기록하고, 이유를 모르면 null로 남겨줘.
 ```
 
 MCP만 직접 등록했다면 이와 같이 최신화 도구 사용을 명시하세요. 도구 등록 자체가 모든 클라이언트의 리뷰 절차를 자동으로 강제하지는 않습니다. 스킬을 사용하는 기존 하네스는 준비·기록·게시 단계에서 맥락 검사를 수행합니다.
 
 각 관점은 사람의 능력·성향을 흉내 내는 용도가 아닙니다. 등록된 업무와 담당 영역을 기준으로 검토 범위를 넓힙니다. 공개 댓글에는 관련 근거만 적고 개인별 전체 업무 내역·로컬 경로·내부 해시는 옮기지 않습니다.
 
-### 11-3. 현재 한계
+### 11-3. 리뷰 완료 기록과 다음 리뷰 재사용
+
+리뷰를 수행한 대화가 기존 MR 설명·댓글·코드·Jira·테스트 근거를 읽고 내부 JSON을 작성합니다. 사람이 MR에 새 필수 항목을 채울 필요는 없습니다. `review_context_complete`에 준비 결과의 `mr_url`, `head_sha`, `context_version`, 판정 `verdict`와 `memory`를 전달합니다. 저장 직전에 GitLab의 현재 SHA를 확인하므로 새 커밋이 있으면 다시 준비하고 리뷰해야 합니다.
+
+`memory`는 `implementation`(구현 방식), `decisions`(결정과 이유), `validations`(검증과 결과), `remainingWork`(남은 작업)의 네 배열이며 정규화한 전체 크기는 64KiB 이내입니다. 직접 확인한 사실은 `observed`, 출처의 진술은 `reported`, 확인하지 못한 내용은 `unknown`으로 구분합니다. 결정 이유를 모르면 `reason: null`, 실행하지 않은 검증은 `not_run`으로 남깁니다. [구조·근거 규칙과 호출 예시](docs/TEAM-CONTEXT.md#리뷰-완료-기록과-재사용)를 따르세요.
+
+다음 `review_context_prepare`는 같은 MR, 연결 Jira키, 또는 같은 GitLab 호스트·프로젝트의 정확히 같은 변경 파일에 해당하는 이전 기록을 `reviewHistory`로 최신 최대 10개·100,000 JSON 문자까지 반환합니다. 항목 중간을 자르지 않으며 자동 응답에서 변경 경로 색인만 생략합니다. 전체 수·생략 수·다음 위치를 확인하고 필요하면 `review_history_list`로 더 조회합니다. 명시적으로 연결한 Jira키는 다른 저장소의 기록도 연결합니다. 당시 SHA의 기록이므로 현재 코드와 요구사항을 우선해 다시 검증하고, 남은 작업을 자동으로 해결된 것으로 취급하지 않습니다.
+
+이 기록은 비공개 데이터 디렉터리에 누적됩니다. 저장 결과의 `stage: reviewed`는 로컬 리뷰 기록 완료이며 Jira 완료·댓글 게시·GitLab 승인·머지를 뜻하지 않습니다. 준비된 맥락의 Jira 연결만 사용하며 완료 호출에서 임의로 다른 이슈를 덧붙이지 않습니다.
+
+### 11-4. 현재 한계
 
 - `review_context_prepare`는 코드를 모두 읽거나 댓글을 게시하는 도구가 아닙니다. 반환 자료를 받은 대화가 실제 코드와 관련 계약을 검토해야 합니다.
 - 연결 Jira가 없으면 완료 조건 판단은 미확인으로 표시하고 코드에서 확인되는 결함을 검토합니다.
@@ -642,7 +659,7 @@ claude plugin list
 /mmp:mr-review https://gitlab.example.com/group/repository/-/merge_requests/42
 ```
 
-`prepare → 코드 리뷰 → record → post → notify` 순서로 진행합니다. `prepare`는 전용 워크트리·최신 Jira 맥락을 준비합니다. 새 리뷰 본문은 `### 작업 맥락`과 실제 Jira키/담당 영역 근거를 요구하고 `post`는 GitLab SHA가 바뀌면 중단합니다. `approve`/`hold`는 댓글 판정이며 GitLab 승인 버튼 조작이 아닙니다.
+`prepare → 코드 리뷰 → record → post → notify` 순서로 진행합니다. `prepare`는 전용 워크트리·최신 Jira 맥락을 준비합니다. 선택 `--jira 'TEAM-123,TEAM-456'`으로 연결 키를 전달할 수 있습니다. 새 리뷰 본문은 `### 작업 맥락`과 실제 Jira키/담당 영역 근거를 요구하며, `record <approve|hold> <본문파일> --memory-file <내부JSON>`은 구조화한 비공개 리뷰 기록도 저장합니다. `post`는 GitLab SHA가 바뀌면 중단합니다. `approve`/`hold`는 댓글 판정이며 GitLab 승인 버튼 조작이 아닙니다.
 
 CLI를 직접 호출할 때 `prepare`가 반환한 `worktreePath`로 이동한 뒤 `record`, `post`, `notify`를 실행합니다. `.env`는 절대 경로로 전달합니다. 단계와 옵션은 [리뷰 하네스](docs/review-harness.md)와 [리뷰 스킬](skills/mr-review/SKILL.md)을 참고하세요.
 
@@ -671,7 +688,7 @@ CLI를 직접 호출할 때 `prepare`가 반환한 `worktreePath`로 이동한 �
 
 ## 15. 전체 MCP 도구
 
-현재 총 30개입니다. 아래는 도구 이름이며 CLI 명령은 아닙니다.
+현재 총 32개입니다. 아래는 도구 이름이며 CLI 명령은 아닙니다.
 
 | 영역 | 도구 |
 |---|---|
@@ -680,6 +697,7 @@ CLI를 직접 호출할 때 `prepare`가 반환한 `worktreePath`로 이동한 �
 | 팀 프로필 | `team_member_upsert`, `team_member_list` |
 | Jira·주간 요약 | `team_sync`, `team_member_context`, `team_weekly_summary` |
 | MR 최신 맥락 | `review_context_prepare` |
+| 비공개 리뷰 기록 | `review_context_complete`, `review_history_list` |
 | Mattermost 웹훅 | `webhook_create`, `webhook_list`, `webhook_update`, `webhook_delete` |
 | 논리 채널 | `channel_create`, `channel_list`, `channel_update`, `channel_delete` |
 | Mattermost 사람 | `participant_create`, `participant_list`, `participant_update`, `participant_delete` |
@@ -687,7 +705,7 @@ CLI를 직접 호출할 때 `prepare`가 반환한 `worktreePath`로 이동한 �
 | 메시지 템플릿 | `convention_create`, `convention_list`, `convention_update`, `convention_delete` |
 | 미리보기·전송 | `message_preview`, `message_send`, `message_send_dm` |
 
-`team_sync`, `team_weekly_summary`, `review_context_prepare`는 외부 자료를 읽고 로컬 파일을 갱신합니다. `message_send`, `message_send_dm`은 실제 외부 메시지를 보냅니다. 수신함 조회 도구는 대기 작업을 실행하거나 완료로 처리하지 않습니다.
+`team_sync`, `team_weekly_summary`, `review_context_prepare`는 외부 자료를 읽고 로컬 파일을 갱신합니다. `review_context_complete`는 GitLab SHA를 읽어 확인하고 로컬 리뷰 기록을 저장하며, `review_history_list`는 저장된 기록을 조회합니다. `message_send`, `message_send_dm`은 실제 외부 메시지를 보냅니다. 수신함 조회 도구는 대기 작업을 실행하거나 완료로 처리하지 않습니다.
 
 ## 16. 저장 위치와 백업
 
@@ -701,7 +719,9 @@ CLI를 직접 호출할 때 `prepare`가 반환한 `worktreePath`로 이동한 �
   people/<id>/profile.md
   people/<id>/weeks/<월요일>.md
   issues/<Jira키>/context.md
+  issues/<Jira키>/review-history.md    # 연결된 누적 리뷰 기록의 링크 목록
   reviews/<MR-URL-해시>/<SHA>.md
+  reviews/<MR-URL-해시>/history/<기록ID>.md
   bypass-review.json                  # 기존 하네스, 사용할 때 생성
   watch.json                         # 기존 todos 감시 설정
   watch-state.json                   # 기존 todos 감시 기록
@@ -779,6 +799,7 @@ claude mcp remove reviewbot --scope user
 | `bin/gitlab-webhook.mjs` | 로컬 HTTP 수신기 |
 | `src/jira-client.js` | Jira Cloud 조회·페이지 순회·이력 정규화 |
 | `src/team-context-store.js`, `src/team-context.js` | 팀 저장·관점 구성·주간 요약 |
+| `src/review-memory.js` | 구현·결정·검증·남은 작업의 근거 검사·기록 형식 |
 | `src/gitlab-context.js` | MR 조회·준비 전후 SHA 확인 |
 | `bin/mr-review.mjs`, `bin/mr-watch.mjs` | 기존 리뷰 하네스·todos 감시 |
 | `skills/`, `hooks/` | 리뷰 절차·원본 클라이언트 훅 |

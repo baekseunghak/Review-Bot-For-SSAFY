@@ -152,7 +152,7 @@ export function collectAuthorNotes(payload, authorGitlab) {
     for (const note of discussion?.notes ?? discussion?.Notes ?? [discussion]) {
       if (!note || note.system) continue; // 시스템 활동 로그는 게시자 의도가 아니다
       if (note.author?.username !== authorGitlab) continue;
-      notes.push({ createdAt: note.created_at ?? null, body: note.body ?? "" });
+      notes.push({ id: note.id ?? null, createdAt: note.created_at ?? null, body: note.body ?? "" });
     }
   }
   return notes.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
@@ -292,7 +292,11 @@ export function syncMrWorktree({ cwd, remote, iid, sourceBranch, worktreeRoot, h
 }
 
 export async function cmdPrepare(rawUrl, flags = {}, dependencies = {}) {
-  if (!rawUrl) fail("사용법: mr-review.mjs prepare <MR 링크> [--worktree-root <경로>] [--here]");
+  if (!rawUrl) fail("사용법: mr-review.mjs prepare <MR 링크> [--jira <키1,키2>] [--worktree-root <경로>] [--here]");
+  if (flags.jira !== undefined && (typeof flags.jira !== "string" || !flags.jira.split(",").some((key) => key.trim()))) {
+    fail("--jira에는 Jira 키를 쉼표로 구분해 적으세요. 예: --jira TEAM-1,TEAM-2");
+  }
+  const issueKeys = flags.jira?.split(",").map((key) => key.trim()).filter(Boolean) ?? [];
   rawUrl = canonicalMrUrl(rawUrl);
   const { host, project, iid } = parseMrUrl(rawUrl);
   assertGlabAuth(host, dependencies.tryRunImpl ?? tryRun);
@@ -325,8 +329,8 @@ export async function cmdPrepare(rawUrl, flags = {}, dependencies = {}) {
     cwd, remote, iid, sourceBranch: mr.source_branch, worktreeRoot, here: flags.here === true,
   }, exec);
   // 최신화가 실패했을 때 직전 준비 상태로 검토·게시하는 일을 막는다.
-  writeState({ version: 2, mrUrl: String(rawUrl).trim(), host, project, iid,
-    step: "preparing", contextRequired: true, context: null }, worktree.path);
+  writeState({ version: 3, mrUrl: String(rawUrl).trim(), host, project, iid,
+    step: "preparing", contextRequired: true, reviewMemoryRequired: true, context: null }, worktree.path);
   // diff base. 없으면 diffCommand가 눈에 띄게 실패하므로 조용히 틀린 범위를 리뷰하는 일은 없다.
   try { exec("git", ["fetch", remote, `+refs/heads/${mr.target_branch}:refs/remotes/${remote}/${mr.target_branch}`], { cwd }); }
   catch { /* diffCommand가 실패하면 확인 범위를 추정하지 않고 멈춘다. */ }
@@ -339,7 +343,7 @@ export async function cmdPrepare(rawUrl, flags = {}, dependencies = {}) {
   }
   let context;
   try {
-    context = await prepareMrContext({ mrUrl: String(rawUrl).trim(), contextService, runImpl: exec });
+    context = await prepareMrContext({ mrUrl: String(rawUrl).trim(), contextService, runImpl: exec, issueKeys });
   } finally {
     if (ownsContextService) contextService.close();
   }
@@ -379,7 +383,7 @@ export async function cmdPrepare(rawUrl, flags = {}, dependencies = {}) {
   const postQuestions = mmQuestions({ authorGitlab, mention, channels, hasConvention, storageError });
 
   const state = writeState({
-    version: 2,
+    version: 3,
     mrUrl: String(rawUrl).trim(),
     host,
     project,
@@ -393,6 +397,7 @@ export async function cmdPrepare(rawUrl, flags = {}, dependencies = {}) {
     targetBranch: mr.target_branch ?? null,
     branch: worktree.branch,
     contextRequired: true,
+    reviewMemoryRequired: true,
     context,
     headSha: context.headSha,
     contextVersion: context.contextVersion,
@@ -454,11 +459,21 @@ export function reviewContextProblems(state, body) {
     : ["작업 맥락에 관련 Jira 키나 실제 담당 영역·변경 경로를 인용하고 확인 결과를 적으세요. 영향이 없다면 그 근거를 적으세요."];
 }
 
-export function cmdRecord(verdict, bodyFile, { cwd = process.cwd() } = {}) {
+export function reviewMemoryProblems(state) {
+  if (!state?.reviewMemoryRequired) return [];
+  const receipt = state.reviewMemory;
+  return /^[a-f0-9]{64}$/i.test(receipt?.id ?? "")
+    && receipt.mrUrl === state.mrUrl && receipt.headSha === state.headSha
+    && receipt.contextVersion === state.contextVersion && receipt.verdict === state.verdict
+    && receipt.stage === "reviewed" ? []
+    : ["리뷰 완료 기록이 없거나 현재 리뷰와 다릅니다. --memory-file을 지정해 record부터 다시 실행하세요."];
+}
+
+export async function cmdRecord(verdict, bodyFile, { cwd = process.cwd(), memoryFile, contextService } = {}) {
   const state = readState(cwd);
   if (!state) fail("먼저 `prepare <MR 링크>`를 실행하세요.");
   if (state.step === "posted" || state.step === "notified") fail("이미 게시된 리뷰입니다. 다시 하려면 `reset` 후 시작하세요.");
-  if (!bodyFile) fail("사용법: mr-review.mjs record <approve|hold> <본문파일>");
+  if (!bodyFile) fail("사용법: mr-review.mjs record <approve|hold> <본문파일> [--memory-file <기록JSON>]");
 
   const body = readFileSync(bodyFile, "utf8").trim();
   if (!body) fail("리뷰 본문이 비어 있습니다.");
@@ -481,7 +496,36 @@ export function cmdRecord(verdict, bodyFile, { cwd = process.cwd() } = {}) {
   }
   const problems = verdictProblems(verdict, body);
   if (problems.length) fail(problems.join("\n"));
-  return writeState({ ...state, step: "reviewed", verdict, body }, cwd);
+  let reviewMemory = state.reviewMemory ?? null;
+  if (state.reviewMemoryRequired || memoryFile !== undefined) {
+    writeState({ ...state, step: "prepared", verdict: null, body: null, reviewMemory: null }, cwd);
+    if (typeof memoryFile !== "string" || !memoryFile.trim()) {
+      fail("리뷰 완료 기록 JSON이 필요합니다. --memory-file <기록JSON>을 지정하세요.");
+    }
+    let memory;
+    try { memory = JSON.parse(readFileSync(memoryFile, "utf8").replace(/^\uFEFF/, "")); }
+    catch { fail("리뷰 완료 기록 파일을 읽지 못했거나 JSON 형식이 올바르지 않습니다."); }
+    const ownsContextService = !contextService;
+    if (!contextService) {
+      const { TeamContextService } = await import("../src/team-context.js");
+      contextService = new TeamContextService();
+    }
+    let saved;
+    try {
+      saved = await contextService.completeReview({
+        mrUrl: state.mrUrl, headSha: state.headSha, contextVersion: state.contextVersion, verdict, memory,
+      });
+    } finally {
+      if (ownsContextService) contextService.close();
+    }
+    reviewMemory = {
+      id: saved?.id, mrUrl: saved?.mrUrl, headSha: saved?.headSha, contextVersion: saved?.contextVersion,
+      verdict: saved?.verdict, stage: saved?.stage, recordedAt: saved?.recordedAt, path: saved?.path,
+    };
+    const memoryProblems = reviewMemoryProblems({ ...state, reviewMemoryRequired: true, verdict, reviewMemory });
+    if (memoryProblems.length) fail(memoryProblems.join("\n"));
+  }
+  return writeState({ ...state, step: "reviewed", verdict, body, reviewMemory }, cwd);
 }
 
 export async function cmdPost(flags = {}, { cwd = process.cwd(), runImpl = run } = {}) {
@@ -489,6 +533,8 @@ export async function cmdPost(flags = {}, { cwd = process.cwd(), runImpl = run }
   requireStep(state, "reviewed", "`record <approve|hold> <본문파일>`을 먼저 실행하세요.");
   const contextProblems = reviewContextProblems(state, state.body);
   if (contextProblems.length) fail(contextProblems.join("\n"));
+  const memoryProblems = reviewMemoryProblems(state);
+  if (memoryProblems.length) fail(memoryProblems.join("\n"));
   // 권한 프롬프트는 세션 모드(auto 등)에 따라 사람에게 닿지 않는다.
   // 그래서 승인을 권한 계층이 아니라 대화 계층(AskUserQuestion)에 두고, 여기서 그 증거를 요구한다.
   if (flags.confirmed !== true && autoMode() !== "bypass") {
@@ -643,7 +689,7 @@ async function main(argv) {
   const [command, ...rest] = argv;
   switch (command) {
     case "prepare": return cmdPrepare(rest[0], parseFlags(rest.slice(1)));
-    case "record": return cmdRecord(rest[0], rest[1]);
+    case "record": return cmdRecord(rest[0], rest[1], { memoryFile: parseFlags(rest.slice(2))["memory-file"] });
     case "post": return cmdPost(parseFlags(rest));
     case "notify": return cmdNotify(parseFlags(rest));
     case "status": return readState() ?? { step: null };

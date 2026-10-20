@@ -7,16 +7,29 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { TeamContextService } from "../src/team-context.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const networkGuard = `data:text/javascript,${encodeURIComponent('globalThis.fetch = async () => { throw new Error("Network disabled in protocol test"); };')}`;
 
-async function start(dataDir) {
+async function start(dataDir, { headSha } = {}) {
   const env = { MATTERMOST_MCP_DATA_DIR: dataDir };
   for (const key of ["SystemRoot", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP", "ComSpec"]) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
-  const child = spawn(process.execPath, ["--import", networkGuard, join(root, "src/server.js")], {
+  const mockGlab = headSha ? `data:text/javascript,${encodeURIComponent(`
+    import cp from 'node:child_process';
+    import { syncBuiltinESMExports } from 'node:module';
+    function fixtureExec() { throw new Error('Real CLI disabled in test'); }
+    fixtureExec[Symbol.for('nodejs.util.promisify.custom')] = async (file, args) => {
+      if (file !== 'glab' || args[0] !== 'api' || !args[1].endsWith('/merge_requests/31')) throw new Error('Unexpected test CLI request');
+      return { stdout: JSON.stringify({ sha: ${JSON.stringify(headSha)} }), stderr: '' };
+    };
+    cp.execFile = fixtureExec;
+    syncBuiltinESMExports();
+    globalThis.fetch = async () => { throw new Error('Network disabled in protocol test'); };
+  `)}` : networkGuard;
+  const child = spawn(process.execPath, ["--import", mockGlab, join(root, "src/server.js")], {
     cwd: root, env, stdio: ["pipe", "pipe", "pipe"],
   });
   child.stderr.resume();
@@ -138,6 +151,71 @@ test("stdio MCP registers ten profiles, persists responsibilities and distinguis
     assert.equal(restoredContext.data.member.jiraAccountId, "test-member:10");
     assert.equal(restoredContext.data.sync.lastSuccessAt, null);
   } finally {
+    await mcp?.stop();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("stdio completion persists bound memory and returns it through the history tool without external writes", { timeout: 20_000 }, async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "review-memory-protocol-"));
+  const headSha = "b".repeat(40);
+  const mrUrl = "https://gitlab.example.test/team/repo/-/merge_requests/31";
+  const issue = { key: "TEST-31", summary: "Fixture workflow", description: "Fixture acceptance criteria",
+    status: { id: "1", name: "In progress", category: "indeterminate" },
+    assigneeAccountId: "test-member:1", updatedAt: "2026-10-20T00:00:00.000Z", createdAt: "2026-10-19T00:00:00.000Z",
+    url: "https://jira.example.test/browse/TEST-31", components: [], inCurrentSprint: true,
+    history: [], historyComplete: true, descriptionTruncated: false };
+  let contextService;
+  let mcp;
+  try {
+    contextService = new TeamContextService({ dataDir, jiraClient: { configured: true,
+      async getMemberIssues() { return { issues: [issue], complete: true, fetchedAt: "2026-10-20T00:00:00.000Z" }; },
+      async getIssue() { return issue; },
+    } });
+    const p = profile(1);
+    contextService.upsertMember({ id: p.id, displayName: p.display_name, gitlabUsername: p.gitlab_username,
+      gitlabUserId: p.gitlab_user_id, jiraAccountId: p.jira_account_id, areas: p.areas, paths: p.paths, reviewFocus: p.review_focus });
+    const prepared = await contextService.prepareReview({ mrUrl, headSha, author: { id: p.gitlab_user_id, username: p.gitlab_username },
+      issueKeys: [issue.key], changedPaths: ["module-1/src/handler.js"] });
+    contextService.close();
+    contextService = null;
+    mcp = await start(dataDir, { headSha });
+    const listed = await mcp.request("tools/list");
+    assert.equal(listed.result.tools.length, 32);
+    assert.ok(listed.result.tools.some((tool) => tool.name === "review_context_prepare" && tool.inputSchema.properties.jira_keys));
+    assert.equal((await mcp.tool("review_history_list")).data.total, 0);
+    const memory = {
+      implementation: [{ summary: "Handler validates requests before processing", basis: "observed", evidence: [{ kind: "code", ref: "module-1/src/handler.js:12" }] }],
+      decisions: [{ decision: "Validate first", reason: "Reject invalid requests before doing work", basis: "reported", evidence: [{ kind: "mr_description", ref: mrUrl }] }],
+      validations: [{ check: "Fixture handler test", result: "passed", basis: "reported", evidence: [{ kind: "mr_comment", ref: `${mrUrl}#note_19` }] }],
+      remainingWork: [{ summary: "Load test has not been confirmed", basis: "unknown", evidence: [] }],
+    };
+    const args = { mr_url: mrUrl, head_sha: headSha, context_version: prepared.contextVersion, verdict: "hold", memory };
+    const mismatched = await mcp.tool("review_context_complete", { ...args, context_version: "0".repeat(64) });
+    assert.equal(mismatched.isError, true);
+    assert.equal((await mcp.tool("review_history_list")).data.total, 0);
+    const saved = await mcp.tool("review_context_complete", args);
+    assert.equal(saved.isError, false);
+    assert.equal(saved.data.stage, "reviewed");
+    assert.equal(saved.data.authorMemberId, p.id);
+    assert.deepEqual(saved.data.issueKeys, [issue.key]);
+    assert.deepEqual(saved.data.changedPaths, ["module-1/src/handler.js"]);
+    assert.deepEqual(saved.data.memory, memory);
+    const repeated = await mcp.tool("review_context_complete", args);
+    assert.equal(repeated.isError, false);
+    assert.equal(repeated.data.id, saved.data.id);
+    assert.ok(existsSync(saved.data.path));
+    const found = await mcp.tool("review_history_list", { jira_keys: [issue.key], limit: 1 });
+    assert.equal(found.isError, false);
+    assert.equal(found.data.total, 1);
+    assert.equal(found.data.nextOffset, null);
+    assert.equal(found.data.records[0].id, saved.data.id);
+    assert.equal((await mcp.tool("review_history_list", { jira_keys: ["TEST-99"] })).data.total, 0);
+    const extraField = await mcp.request("tools/call", { name: "review_context_complete", arguments: { ...args, jira_keys: ["TEST-99"] } });
+    assert.equal(extraField.result.isError, true);
+    assert.equal((await mcp.tool("review_history_list")).data.total, 1);
+  } finally {
+    contextService?.close();
     await mcp?.stop();
     rmSync(dataDir, { recursive: true, force: true });
   }

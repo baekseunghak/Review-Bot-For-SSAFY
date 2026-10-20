@@ -1,7 +1,7 @@
 {
   "name": "mmp",
-  "version": "0.7.1",
-  "description": "Collect GitLab review requests, prepare Jira team context, save weekly summaries, and manage Mattermost messages.",
+  "version": "0.8.0",
+  "description": "Collect GitLab review requests, retain cumulative review memory, prepare Jira team context, save weekly summaries, and manage Mattermost messages.",
   "author": {
     "name": "baekseunghak",
     "url": "https://github.com/baekseunghak"
@@ -18,7 +18,7 @@
   "interface": {
     "displayName": "Review Bot for SSAFY",
     "shortDescription": "GitLab 리뷰 수신함과 Jira 팀 맥락·주간 요약 관리",
-    "longDescription": "GitLab 리뷰 요청을 모으고 등록 팀원의 Jira 작업과 담당 영역을 최신화해 리뷰 맥락과 주간 요약을 제공합니다. Mattermost 메시지와 DM도 관리합니다.",
+    "longDescription": "GitLab 리뷰 요청을 모으고 등록 팀원의 Jira 작업과 담당 영역을 최신화해 리뷰 맥락과 주간 요약을 제공합니다. 구현 방식과 결정 이유를 누적해 다음 리뷰에 반영하고 Mattermost 메시지와 DM도 관리합니다.",
     "developerName": "baekseunghak",
     "category": "Productivity",
     "capabilities": [

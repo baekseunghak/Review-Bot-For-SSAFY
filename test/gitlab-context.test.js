@@ -54,8 +54,21 @@ test("전체 diff 페이지와 이름 변경 전후 경로를 수집한다", asy
   assert.ok(context.changedPaths.includes("old/name.js"));
   assert.ok(context.changedPaths.includes("new/name.js"));
   assert.equal(context.headSha, headSha);
+  assert.equal(context.mrSource.description, metadata().description);
+  assert.equal(context.mrSource.descriptionTruncated, false);
   assert.match(calls[0][1], /^projects\/group%2Fsub%2Frepo\/merge_requests\/71$/);
   assert.equal(calls.length, 3);
+});
+
+test("추가 Jira 키는 MR 양식을 바꾸지 않고 연결하며 긴 설명은 생략 여부를 표시한다", async () => {
+  const result = await prepareMrContext({
+    mrUrl, issueKeys: ["TEAM-99", "TEAM-12"],
+    runImpl: runner({ mr: metadata({ description: "x".repeat(16_001) }) }),
+    contextService: { prepareReview: async (input) => ({ ...input, status: "fresh" }) },
+  });
+  assert.deepEqual(result.issueKeys, ["TEAM-12", "TEAM-14", "TEAM-99"]);
+  assert.equal(result.mrSource.description.length, 16_000);
+  assert.equal(result.mrSource.descriptionTruncated, true);
 });
 
 test("SHA-256 저장소의 커밋도 허용한다", async () => {

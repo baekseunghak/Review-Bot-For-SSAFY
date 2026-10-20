@@ -3,8 +3,10 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { HOLD_CATEGORIES, citedLocations, cmdPost, cmdPrepare, cmdRecord, collectAuthorNotes, gateDecision, missingSections, mmQuestions, parseMrUrl, reviewContextProblems, sessionTitleFor, syncMrWorktree, usedHoldCategories, verdictProblems } from "../bin/mr-review.mjs";
+import { HOLD_CATEGORIES, citedLocations, cmdPost, cmdPrepare, cmdRecord, collectAuthorNotes, gateDecision, missingSections, mmQuestions, parseMrUrl, reviewContextProblems, reviewMemoryProblems, sessionTitleFor, syncMrWorktree, usedHoldCategories, verdictProblems } from "../bin/mr-review.mjs";
+import { TeamContextService } from "../src/team-context.js";
 
 const bash = (command) => ({ tool_name: "Bash", tool_input: { command } });
 const at = (step, extra = {}) => () => ({ step, iid: 71, project: "group/repo", verdict: "hold", body: "본문", ...extra });
@@ -94,10 +96,10 @@ test("record의 작업 근거 검사와 post의 최신 커밋 검사가 실제 �
     writeFileSync(stateFile, JSON.stringify(contextState()));
     const bodyFile = join(cwd, "review.md");
     writeFileSync(bodyFile, "## 리뷰 결과: 승인\n### 확인한 범위\nsrc/api/auth.js");
-    assert.throws(() => cmdRecord("approve", bodyFile, { cwd }), /작업 맥락/);
+    await assert.rejects(cmdRecord("approve", bodyFile, { cwd }), /작업 맥락/);
     assert.equal(JSON.parse(readFileSync(stateFile, "utf8")).step, "prepared");
     writeFileSync(bodyFile, "## 리뷰 결과: 승인\n### 확인한 범위\nsrc/api/auth.js\n### 작업 맥락\nTEAM-12의 요구사항을 확인함");
-    assert.equal(cmdRecord("approve", bodyFile, { cwd }).step, "reviewed");
+    assert.equal((await cmdRecord("approve", bodyFile, { cwd })).step, "reviewed");
     let posted = 0;
     await assert.rejects(cmdPost({ confirmed: true }, { cwd, runImpl: (_file, args) => {
       if (args[0] === "api") return JSON.stringify({ sha: "b".repeat(40) });
@@ -115,6 +117,138 @@ test("record의 작업 근거 검사와 post의 최신 커밋 검사가 실제 �
     assert.equal(result.step, "posted");
     assert.equal(posted, 1);
   } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("새 record는 내부 기록 저장 성공 후에만 reviewed로 진입하고 재기록 실패 시 이전 완료 기록을 무효화한다", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "mmp-review-memory-"));
+  const body = "## 리뷰 결과: 승인\n### 확인한 범위\nsrc/api/auth.js\n### 작업 맥락\nTEAM-12 요구사항을 확인함";
+  const memory = {
+    implementation: [{ summary: "토큰 검증을 공통 함수로 분리", basis: "observed", evidence: [{ kind: "code", ref: "src/api/auth.js:10" }] }],
+    decisions: [{ decision: "공통 검증 함수 사용", reason: null, basis: "observed", evidence: [{ kind: "code", ref: "src/api/auth.js:10" }] }],
+    validations: [{ check: "격리 테스트", result: "passed", basis: "observed", evidence: [{ kind: "test", ref: "node --test test/auth.test.js: exit 0" }] }],
+    remainingWork: [],
+  };
+  try {
+    execFileSync("git", ["init", "-b", "main"], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const stateFile = join(cwd, ".git", "mmp-mr-review.json");
+    const state = { ...contextState(), version: 3, reviewMemoryRequired: true };
+    const bodyFile = join(cwd, "review.md");
+    const memoryFile = join(cwd, "memory.json");
+    writeFileSync(stateFile, JSON.stringify(state));
+    writeFileSync(bodyFile, body);
+    await assert.rejects(cmdRecord("approve", bodyFile, { cwd }), /--memory-file/);
+    assert.equal(JSON.parse(readFileSync(stateFile, "utf8")).step, "prepared");
+    writeFileSync(memoryFile, '{"implementation":"fixture-private-text",broken}');
+    const harness = fileURLToPath(new URL("../bin/mr-review.mjs", import.meta.url));
+    assert.throws(() => execFileSync(process.execPath, [harness, "record", "approve", bodyFile, "--memory-file", memoryFile],
+      { cwd, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" }), (error) => {
+      assert.match(error.stderr, /JSON 형식/);
+      assert.doesNotMatch(error.stderr, /fixture-private-text/);
+      return true;
+    });
+    writeFileSync(memoryFile, `\uFEFF${JSON.stringify(memory)}`);
+    let recorded;
+    const contextService = { async completeReview(input) {
+      recorded = input;
+      return { ...input, id: "e".repeat(64), stage: "reviewed", recordedAt: "2026-10-20T00:00:00.000Z", path: "private-review-memory.md" };
+    } };
+    const saved = await cmdRecord("approve", bodyFile, { cwd, memoryFile, contextService });
+    assert.equal(saved.step, "reviewed");
+    assert.equal(saved.body, body, "공개 본문에 내부 JSON을 추가하지 않음");
+    assert.equal(saved.reviewMemory.id, "e".repeat(64));
+    assert.deepEqual(recorded, { mrUrl: state.mrUrl, headSha: state.headSha, contextVersion: state.contextVersion, verdict: "approve", memory });
+    assert.deepEqual(reviewMemoryProblems(saved), []);
+    const missing = { ...saved, reviewMemory: null };
+    writeFileSync(stateFile, JSON.stringify(missing));
+    await assert.rejects(cmdPost({ confirmed: true }, { cwd, runImpl: () => { throw new Error("게시 도구가 호출되면 안 됨"); } }), /완료 기록/);
+    writeFileSync(stateFile, JSON.stringify(saved));
+    await assert.rejects(cmdRecord("approve", bodyFile, { cwd, memoryFile, contextService: { completeReview: async () => { throw new Error("memory storage failed"); } } }), /memory storage failed/);
+    const failed = JSON.parse(readFileSync(stateFile, "utf8"));
+    assert.equal(failed.step, "prepared");
+    assert.equal(failed.reviewMemory, null);
+    assert.equal(failed.body, null);
+    await assert.rejects(cmdPost({ confirmed: true }, { cwd, runImpl: () => { throw new Error("게시 도구가 호출되면 안 됨"); } }), /record/);
+    await assert.rejects(cmdRecord("approve", bodyFile, { cwd, memoryFile, contextService: { completeReview: async (input) => ({ ...input, id: "e".repeat(64), stage: "reviewed", headSha: "b".repeat(40) }) } }), /완료 기록/);
+    assert.equal(JSON.parse(readFileSync(stateFile, "utf8")).step, "prepared");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("게시 전 완료 기록은 현재 MR·커밋·맥락 버전·판정과 결합되어야 한다", () => {
+  const state = { ...contextState(), reviewMemoryRequired: true, step: "reviewed", verdict: "approve" };
+  const receipt = { id: "e".repeat(64), mrUrl: state.mrUrl, headSha: state.headSha, contextVersion: state.contextVersion, verdict: "approve", stage: "reviewed" };
+  assert.deepEqual(reviewMemoryProblems({ ...state, reviewMemory: receipt }), []);
+  for (const change of [{ id: "bad" }, { mrUrl: "https://other.example/g/r/-/merge_requests/1" }, { headSha: "b".repeat(40) },
+    { contextVersion: "0".repeat(64) }, { verdict: "hold" }, { stage: "posted" }]) {
+    assert.match(reviewMemoryProblems({ ...state, reviewMemory: { ...receipt, ...change } }).join(), /완료 기록/);
+  }
+  assert.deepEqual(reviewMemoryProblems({ step: "reviewed" }), [], "이전 저장 상태에는 새 필드를 강제하지 않음");
+});
+
+test("실제 완료 서비스와 record·post를 연결하고 저장한 구현 기록을 다음 준비에서 다시 읽는다", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "mmp-completion-integration-"));
+  let service;
+  try {
+    execFileSync("git", ["init", "-b", "main"], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let liveHead = "a".repeat(40);
+    service = new TeamContextService({
+      dataDir: join(cwd, "private-data"), readHead: async () => {
+        if (liveHead === null) throw new Error("fixture unavailable");
+        return liveHead;
+      },
+      jiraClient: { configured: true, getMemberIssues: async () => ({ complete: true, issues: [], fetchedAt: "2026-10-20T00:00:00.000Z" }) },
+    });
+    service.upsertMember({ id: "member-0", displayName: "가상 담당자", gitlabUsername: "fixture.member", gitlabUserId: 1,
+      jiraAccountId: "fixture-jira", areas: ["src/api"], paths: ["src/api"], reviewFocus: ["입력 검증"] });
+    const mrUrl = "https://gitlab.example.com/group/repo/-/merge_requests/71";
+    const prepareInput = { mrUrl, headSha: liveHead, author: { id: 1, username: "fixture.member" }, changedPaths: ["src/api/auth.js"] };
+    const context = await service.prepareReview(prepareInput);
+    const state = { ...contextState(1), version: 3, reviewMemoryRequired: true, context, contextVersion: context.contextVersion };
+    const stateFile = join(cwd, ".git", "mmp-mr-review.json");
+    const bodyFile = join(cwd, "review.md");
+    const memoryFile = join(cwd, "memory.json");
+    const body = "## 리뷰 결과: 승인\n### 확인한 범위\nsrc/api/auth.js\n### 작업 맥락\nsrc/api의 입력 검증 계약을 확인함";
+    const memory = { implementation: [{ summary: "요청 입력을 공통 함수에서 검증함", basis: "observed", evidence: [{ kind: "code", ref: "src/api/auth.js:10" }] }],
+      decisions: [], validations: [], remainingWork: [] };
+    writeFileSync(stateFile, JSON.stringify(state));
+    writeFileSync(bodyFile, body);
+    writeFileSync(memoryFile, JSON.stringify(memory));
+    const recorded = await cmdRecord("approve", bodyFile, { cwd, memoryFile, contextService: service });
+    assert.equal(recorded.step, "reviewed");
+    assert.deepEqual(reviewMemoryProblems(recorded), []);
+    assert.equal(service.reviewHistory({ mrUrl }).total, 1);
+    const stored = service.reviewHistory({ mrUrl }).records[0];
+    assert.equal(stored.id, recorded.reviewMemory.id);
+    assert.deepEqual(stored.memory, memory);
+    assert.equal(stored.stage, "reviewed");
+    assert.equal(Object.hasOwn(stored, "body"), false);
+
+    liveHead = null;
+    await assert.rejects(cmdRecord("approve", bodyFile, { cwd, memoryFile, contextService: service }), /live GitLab head/);
+    assert.equal(JSON.parse(readFileSync(stateFile, "utf8")).step, "prepared");
+    assert.equal(JSON.parse(readFileSync(stateFile, "utf8")).reviewMemory, null);
+    assert.equal(service.reviewHistory({ mrUrl }).total, 1);
+    liveHead = "a".repeat(40);
+    const retried = await cmdRecord("approve", bodyFile, { cwd, memoryFile, contextService: service });
+    assert.equal(retried.reviewMemory.id, recorded.reviewMemory.id);
+    assert.equal(service.reviewHistory({ mrUrl }).total, 1, "동일 준비 상태에서 재시도하면 중복 기록하지 않음");
+    let posts = 0;
+    const posted = await cmdPost({ confirmed: true }, { cwd, runImpl: (_file, args) => {
+      if (args[0] === "api") return JSON.stringify({ sha: liveHead });
+      posts += 1;
+      assert.equal(args[args.indexOf("--message") + 1], body);
+      return "fixture posted";
+    } });
+    assert.equal(posted.step, "posted");
+    assert.equal(posts, 1);
+    const next = await service.prepareReview(prepareInput);
+    assert.equal(next.reviewHistory.records[0].id, recorded.reviewMemory.id);
+    assert.match(readFileSync(next.path, "utf8"), /요청 입력을 공통 함수에서 검증함/);
+  } finally {
+    service?.close();
     rmSync(cwd, { recursive: true, force: true });
   }
 });
@@ -156,16 +290,18 @@ test("prepare는 실제 워크트리와 최신 팀 맥락을 연결하고 갱신
         return JSON.stringify(metadata);
       },
       contextService: { prepareReview: async (input) => {
-        assert.deepEqual(input.issueKeys, ["TEAM-12"]);
+        assert.deepEqual(input.issueKeys, ["TEAM-12", "TEAM-13"]);
         assert.deepEqual(input.changedPaths, ["auth.js"]);
         assert.deepEqual(input.author, { username: "dev.one", id: 1 });
         return { ...state.context, mrUrl: input.mrUrl, headSha: input.headSha };
       } },
       mattermostService: async () => ({ listChannels: () => [], listParticipants: () => [], listConventions: () => [], close() {} }),
     };
-    const result = await cmdPrepare(state.mrUrl, { "worktree-root": join(root, "worktrees") }, dependencies);
+    const result = await cmdPrepare(state.mrUrl, { "worktree-root": join(root, "worktrees"), jira: "TEAM-13, TEAM-12" }, dependencies);
     assert.equal(result.step, "prepared");
     assert.equal(result.contextRequired, true);
+    assert.equal(result.reviewMemoryRequired, true);
+    assert.equal(result.version, 3);
     assert.equal(result.headSha, headSha);
     assert.equal(result.contextVersion, state.contextVersion);
     assert.equal(git(result.worktreePath, "rev-parse", "HEAD"), headSha);
@@ -193,6 +329,12 @@ test("MR 링크에서 프로젝트와 번호를 뽑는다", () => {
 test("MR 링크가 아니면 거부한다", () => {
   for (const bad of ["!71", "71", "", "https://gitlab.example.com/group/repo/-/issues/71", "https://gitlab.example.com/group/repo"]) {
     assert.throws(() => parseMrUrl(bad), /MR 링크/);
+  }
+});
+
+test("명시 Jira 연결에 키를 생략하면 GitLab에 연결하기 전에 거부한다", async () => {
+  for (const jira of [true, "", " , "]) {
+    await assert.rejects(cmdPrepare("https://gitlab.example.com/group/repo/-/merge_requests/71", { jira }), /--jira/);
   }
 });
 
@@ -378,7 +520,7 @@ test("게이트는 워크플로 밖의 호출에 간섭하지 않는다", () => 
 
 test("게시자 댓글만 시간순으로 모은다", () => {
   const discussions = [
-    { notes: [{ author: { username: "gildong" }, created_at: "2026-09-02T00:00:00Z", body: "두번째" }] },
+    { notes: [{ id: 82, author: { username: "gildong" }, created_at: "2026-09-02T00:00:00Z", body: "두번째" }] },
     { notes: [
       { author: { username: "reviewer" }, created_at: "2026-09-03T00:00:00Z", body: "남의 댓글" },
       { author: { username: "gildong" }, created_at: "2026-09-01T00:00:00Z", body: "첫번째" },
@@ -386,6 +528,7 @@ test("게시자 댓글만 시간순으로 모은다", () => {
     ] },
   ];
   assert.deepEqual(collectAuthorNotes(discussions, "gildong").map((note) => note.body), ["첫번째", "두번째"]);
+  assert.equal(collectAuthorNotes(discussions, "gildong")[1].id, 82, "내부 구현 기록의 실제 댓글 출처를 연결할 수 있음");
   assert.deepEqual(collectAuthorNotes(discussions, null), []);
   assert.deepEqual(collectAuthorNotes(null, "gildong"), []);
 });

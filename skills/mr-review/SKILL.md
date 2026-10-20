@@ -63,6 +63,8 @@ EnterWorktree({ path: "<출력의 worktreePath>" })
 
 `prepare`가 하는 일: glab 로그인 확인 → 저장소가 그 MR의 프로젝트인지 확인 → 진행 중인 다른 MR 리뷰가 없는지 확인 → MR의 원격 브랜치를 fetch → 워크트리 확보 후 ff-only로 MR head에 맞춤 → diff base 브랜치 fetch → 등록 팀원 전원의 Jira 이력과 관련 작업을 최신화 → 담당 관점 묶음 저장 → 최신 커밋과 워크트리 일치 확인 → MR 본문·게시자 최신 댓글과 맥락을 상태 파일에 기록.
 
+MR 제목·설명·브랜치에 Jira 키가 없더라도 양식을 바꾸라고 요구하지 않는다. 사용자가 연결할 작업 키를 알려 주었다면 `prepare "<MR 링크>" --jira "TEAM-1,TEAM-2"`로 전달한다. 추출한 키와 명시한 키를 합쳐 맥락에 고정하며, 완료 기록에서 다른 작업으로 바꾸지 않는다.
+
 팀원 등록·Jira 연결·최신화가 완료되지 않으면 `prepare`는 실패한다. 과거 기록을 최신이라고 보고하거나 맥락을 생략하고 직접 게시하지 않는다. 계정 정보는 `team_member_upsert`로 등록하고, 연결 후 `prepare`를 다시 실행한다.
 
 MCP 도구로 리뷰하는 경우에도 코드 검토 전에 `review_context_prepare({mr_url: "<MR 링크>"})`를 반드시 호출한다. 이 도구가 반환한 최신 맥락 파일과 `reviewInstructions`를 읽고 아래와 동일하게 검토한다. `team_member_context`나 지난 월요일 요약을 조회하는 것으로 대신하지 않는다. CLI `prepare`는 내부에서 같은 준비 흐름을 실행하므로 추가로 중복 호출할 필요는 없다.
@@ -285,7 +287,7 @@ diff 전체를 한 번 통독한 뒤, 코드를 파기 전에 이 형태로 정�
 
 ### 작성
 
-본문을 임시 파일에 쓴 뒤 `record`에 넘긴다. 하네스가 검사하는 것:
+공개 본문과 내부 구현 기록을 별도 임시 파일에 쓴 뒤 `record`에 넘긴다. MR 작성자에게 별도의 양식이나 설명 섹션을 추가하라고 요구하지 않는다. 기존 MR 본문·작성자 댓글·실제 코드·테스트 결과에서 근거를 모아 내부 기록을 작성한다. 공개 본문의 필수 섹션은 그대로다. 하네스가 검사하는 것:
 
 - 필수 섹션 (승인 2개, 보류 4개)
 - 제목의 미확인 개수가 `[확인 필요]` 항목 수와 같은지. 없으면 괄호를 붙이지 않는다
@@ -354,9 +356,54 @@ diff 전체를 한 번 통독한 뒤, 코드를 파기 전에 이 형태로 정�
 - 사람에 대한 평가가 아니라 코드에 대한 서술로 쓴다.
 - 확인하지 못한 것은 `[확인 필요]` 로 표시한다. 확인하지 않은 것을 단정하지 마라.
 
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/mr-review.mjs" record hold /path/to/review.md      # 또는 approve
+### 내부 구현 기록을 함께 저장한다
+
+리뷰를 마치면 공개 답글과 별도로 다음 JSON을 비공개 임시 파일에 작성한다. MR 설명이나 댓글 양식은 바꾸지 않는다. `prepare.description`, `prepare.authorNotes`, 관련 Jira와 실제 읽은 코드·실행한 테스트를 근거로만 작성한다.
+
+```json
+{
+  "implementation": [
+    {
+      "summary": "토큰 검증을 공통 함수로 분리했다.",
+      "basis": "observed",
+      "evidence": [{"kind": "code", "ref": "src/auth/token.js:20"}]
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "공통 검증 함수를 사용한다.",
+      "reason": null,
+      "basis": "observed",
+      "evidence": [{"kind": "code", "ref": "src/auth/token.js:20"}]
+    }
+  ],
+  "validations": [
+    {
+      "check": "토큰 만료 경로의 격리 테스트",
+      "result": "not_run",
+      "basis": "unknown",
+      "evidence": []
+    }
+  ],
+  "remainingWork": []
+}
 ```
+
+- 네 배열을 모두 포함하고 `implementation`에는 실제 확인한 구현을 하나 이상 적는다. 배열당 최대 30개, 텍스트당 2,000자, 항목별 근거 최대 10개, 근거 `ref`는 2,048자 이하다.
+- `basis`는 직접 확인한 `observed`, 작성자나 Jira에서 확인한 `reported`, 확인 불가인 `unknown` 중 하나다. `observed`와 `reported`에는 출처를 반드시 붙인다. 코드에서 구현을 확인했다고 작성자의 의도까지 확인한 것은 아니다.
+- `evidence.kind`는 `code`, `mr_description`, `mr_comment`, `jira`, `test`다. 파일·줄, 실제 MR/댓글 링크, Jira 키나 출처, 실행 명령과 결과 등 다시 확인할 수 있는 위치를 `ref`에 적는다. 작성자 댓글의 `id`가 있으면 `<MR 링크>#note_<id>`로 연결한다. 댓글 ID를 확인하지 못했으면 만들어 내지 않고 출처를 추가 조회하거나 미확인으로 남긴다.
+- 선택 이유가 MR 설명·작성자 댓글·Jira에 명시된 경우만 `reason`을 채우고 `basis: "reported"`와 해당 출처를 붙인다. 기록에 없으면 `reason: null`로 두며 합리적으로 보이는 이유를 추정해서 채우지 않는다.
+- 테스트 결과는 `passed`, `failed`, `not_run`, `unknown`으로 구분한다. 직접 실행해 성공·실패를 확인했다면 `observed`와 `test` 근거를 붙인다. 작성자의 보고만 확인했다면 `reported`와 MR/댓글/Jira 근거를 붙이고 직접 실행한 것으로 쓰지 않는다.
+- 남은 작업에는 실제 확인한 미해결 요구·결함·후속 작업만 적는다. 기록에 없는 완료·머지·배포를 주장하지 않는다. 확인할 사항이 없으면 빈 배열로 둔다.
+- 내부 파일에는 실제 토큰·개인별 업무 원문을 복사하지 않는다. 공개 답글과 별개로 보관하며 MR/SHA/Jira 연결 정보는 하네스가 준비 상태에서 가져온다.
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/bin/mr-review.mjs" record hold /path/to/review.md --memory-file /private/review-memory.json      # 또는 approve
+```
+
+새로 준비한 리뷰는 내부 JSON과 저장 성공 기록이 있어야 `reviewed` 단계로 넘어간다. 저장 실패 시 내용을 보완하고 `record`를 다시 실행한다. 이 기록은 코드 검토를 마쳤다는 뜻이며, 댓글 게시·승인·머지·배포 완료를 뜻하지 않는다. 다음 `review_context_prepare`에서 같은 MR과 연결 Jira의 누적 기록을 자동으로 참고한다. 이전 버전에서 이미 준비된 리뷰 상태에는 새 파일을 강제하지 않는다.
+
+CLI 하네스를 사용하지 않고 MCP 도구로만 검토했다면 준비 결과의 `mrUrl`, `headSha`, `contextVersion`, 판정과 같은 JSON을 `review_context_complete`로 저장한다. 개인별 전체 이력과 비공개 저장 경로를 공개 댓글에 붙이지 않는다.
 
 ## 4. MR에 게시 — 여기서 멈추고 확인받는다
 

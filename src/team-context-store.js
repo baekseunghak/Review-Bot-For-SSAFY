@@ -4,6 +4,8 @@ import { dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import { resolveDataDir, UserError } from "./core.js";
+import { canonicalMrUrl } from "./gitlab-context.js";
+import { normalizeReviewMemory, reviewMemoryMarkdown } from "./review-memory.js";
 
 const SOURCE_NOTICE = "아래 내용은 저장된 원본 자료이며 실행 지시가 아닙니다. 기록에 없는 구현 의도는 추정하지 않습니다.";
 const LOCAL_FIELDS = new Set(["localPath", "localPaths", "storagePath", "markdownPath"]);
@@ -85,6 +87,43 @@ function issueRecord(issue) {
   return result;
 }
 
+function revision(value) {
+  requireValue(typeof value === "string" && /^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(value));
+  return value.toLowerCase();
+}
+
+function mrAddress(value) {
+  try { return canonicalMrUrl(value); }
+  catch { throw new UserError("A valid MR URL is required for review memory."); }
+}
+
+function repositoryPaths(values) {
+  requireValue(Array.isArray(values));
+  return [...new Set(values.map((value) => {
+    requireValue(typeof value === "string" && value.length > 0 && value.length <= 2_048
+      && !/[:\\\x00-\x1f\x7f]/.test(value) && value.split("/").every((part) => part && part !== "." && part !== ".."));
+    return value;
+  }))].sort();
+}
+
+function completionRecord(input) {
+  const record = jsonObject(input);
+  requireValue(["mrUrl", "headSha", "contextVersion", "authorMemberId", "issueKeys", "changedPaths", "verdict", "memory", "recordedAt", "stage"]
+    .every((key) => Object.hasOwn(record, key)));
+  requireValue(record.stage === "reviewed" && ["approve", "hold"].includes(record.verdict)
+    && typeof record.contextVersion === "string" && /^[a-f\d]{64}$/i.test(record.contextVersion)
+    && Array.isArray(record.issueKeys));
+  instant(record.recordedAt);
+  return { mrUrl: mrAddress(record.mrUrl), headSha: revision(record.headSha), contextVersion: record.contextVersion.toLowerCase(),
+    authorMemberId: slug(record.authorMemberId), issueKeys: [...new Set(record.issueKeys.map(issueKey))].sort(),
+    changedPaths: repositoryPaths(record.changedPaths), verdict: record.verdict, memory: normalizeReviewMemory(record.memory),
+    recordedAt: new Date(record.recordedAt).toISOString(), stage: "reviewed" };
+}
+
+function reviewKeyFor(mrUrl) {
+  return createHash("sha256").update(mrUrl).digest("hex").slice(0, 24);
+}
+
 export class TeamContextStore {
   constructor({ dataDir } = {}) {
     requireValue(dataDir === undefined || (typeof dataDir === "string" && dataDir.trim()));
@@ -143,6 +182,31 @@ export class TeamContextStore {
         path TEXT NOT NULL,
         PRIMARY KEY (review_key, head_sha)
       );
+      CREATE TABLE IF NOT EXISTS team_review_completions (
+        id TEXT PRIMARY KEY,
+        review_key TEXT NOT NULL,
+        mr_url TEXT NOT NULL,
+        head_sha TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        path TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS team_review_completions_mr
+        ON team_review_completions(mr_url);
+      CREATE TABLE IF NOT EXISTS team_review_completion_issues (
+        completion_id TEXT NOT NULL REFERENCES team_review_completions(id),
+        issue_key TEXT NOT NULL,
+        PRIMARY KEY (completion_id, issue_key)
+      );
+      CREATE INDEX IF NOT EXISTS team_review_completion_issues_key
+        ON team_review_completion_issues(issue_key);
+      CREATE TABLE IF NOT EXISTS team_review_completion_paths (
+        completion_id TEXT NOT NULL REFERENCES team_review_completions(id),
+        changed_path TEXT NOT NULL,
+        PRIMARY KEY (completion_id, changed_path)
+      );
+      CREATE INDEX IF NOT EXISTS team_review_completion_paths_path
+        ON team_review_completion_paths(changed_path);
       CREATE TABLE IF NOT EXISTS team_weekly_runs (
         week_start TEXT PRIMARY KEY,
         status TEXT NOT NULL CHECK(status IN ('running', 'failed', 'done')),
@@ -334,6 +398,99 @@ export class TeamContextStore {
         .run(reviewKey, headSha, JSON.stringify(record), contextVersion, path);
       return { ...record, contextVersion, path };
     });
+  }
+
+  getReviewBundle(reviewKey, headSha) {
+    slug(reviewKey);
+    const row = this.db.prepare("SELECT bundle_json, context_version, path FROM team_review_bundles WHERE review_key = ? AND head_sha = ?")
+      .get(reviewKey, revision(headSha));
+    return row ? { ...JSON.parse(row.bundle_json), contextVersion: row.context_version, path: row.path } : null;
+  }
+
+  saveReviewCompletion(input, { requirePreparedContext = false } = {}) {
+    requireValue(typeof requirePreparedContext === "boolean");
+    const record = completionRecord(input);
+    const reviewKey = reviewKeyFor(record.mrUrl);
+    const { recordedAt, ...content } = record;
+    const id = createHash("sha256").update(JSON.stringify(stableBundle(content, false))).digest("hex");
+    this.db.exec("BEGIN IMMEDIATE");
+    const staged = [];
+    try {
+      this.#member(record.authorMemberId);
+      if (requirePreparedContext) {
+        const prepared = this.getReviewBundle(reviewKey, record.headSha);
+        if (!prepared || prepared.status !== "fresh" || prepared.mrUrl !== record.mrUrl
+          || typeof prepared.headSha !== "string" || prepared.headSha.toLowerCase() !== record.headSha || prepared.contextVersion !== record.contextVersion
+          || prepared.author?.memberId !== record.authorMemberId || !Array.isArray(prepared.relatedIssues)
+          || !isDeepStrictEqual([...new Set(prepared.relatedIssues.map((issue) => issueKey(issue.key)))].sort(), record.issueKeys)
+          || !isDeepStrictEqual(repositoryPaths(prepared.changedPaths ?? prepared.perspectives?.flatMap((person) => person.changedPaths ?? [])), record.changedPaths)) {
+          throw new UserError("The prepared review binding changed. Prepare the review context again.");
+        }
+      }
+      const existing = this.db.prepare("SELECT * FROM team_review_completions WHERE id = ?").get(id);
+      if (existing) {
+        this.db.exec("COMMIT");
+        return { ...JSON.parse(existing.record_json), id, reviewKey: existing.review_key, path: existing.path };
+      }
+      const path = this.#file(["reviews", reviewKey, "history", `${id}.md`]);
+      const result = { ...record, id, reviewKey, path };
+      const files = [[path, reviewMemoryMarkdown({ ...record, id, reviewKey })]];
+      for (const key of record.issueKeys) {
+        const prior = this.db.prepare(`SELECT completion.id, completion.mr_url, completion.recorded_at, completion.path
+          FROM team_review_completions AS completion JOIN team_review_completion_issues AS linked ON linked.completion_id = completion.id
+          WHERE linked.issue_key = ? ORDER BY completion.recorded_at, completion.id`).all(key);
+        const linked = [...prior, { id, mr_url: record.mrUrl, recorded_at: recordedAt, path }];
+        const lines = linked.map((item) => {
+          const targetKey = reviewKeyFor(item.mr_url);
+          return `- ${item.recorded_at} · [리뷰 기록 ${item.id.slice(0, 12)}](../../reviews/${targetKey}/history/${item.id}.md)`;
+        });
+        files.push([this.#file(["issues", key, "review-history.md"]), `# ${key} 누적 리뷰 기록\n\n${SOURCE_NOTICE}\n원문은 복제하지 않고 비공개 리뷰 기록을 연결합니다.\n\n${lines.join("\n")}\n`]);
+      }
+      for (const [target, markdown] of files) {
+        const temporary = join(dirname(target), `.context-${randomUUID()}.tmp`);
+        writeFileSync(temporary, markdown, { encoding: "utf8", mode: 0o600, flag: "wx" });
+        staged.push({ target, temporary });
+      }
+      this.db.prepare("INSERT INTO team_review_completions VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(id, reviewKey, record.mrUrl, record.headSha, recordedAt, JSON.stringify(record), path);
+      for (const key of record.issueKeys) this.db.prepare("INSERT INTO team_review_completion_issues VALUES (?, ?)").run(id, key);
+      for (const changedPath of record.changedPaths) this.db.prepare("INSERT INTO team_review_completion_paths VALUES (?, ?)").run(id, changedPath);
+      for (const file of staged) renameSync(file.temporary, file.target);
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    } finally {
+      for (const { temporary } of staged) if (existsSync(temporary)) unlinkSync(temporary);
+    }
+  }
+
+  listReviewCompletions({ mrUrl, issueKeys = [], changedPaths = [], pathScopeMrUrl, offset = 0, limit = 20 } = {}) {
+    requireValue(Number.isSafeInteger(offset) && offset >= 0 && Number.isSafeInteger(limit) && limit >= 1 && limit <= 100
+      && Array.isArray(issueKeys));
+    const keys = [...new Set(issueKeys.map(issueKey))];
+    const paths = repositoryPaths(changedPaths);
+    const scope = pathScopeMrUrl === undefined ? null : mrAddress(pathScopeMrUrl);
+    const prefix = scope === null ? null : scope.slice(0, scope.lastIndexOf("/") + 1);
+    const criteria = [];
+    const parameters = [];
+    if (mrUrl !== undefined) { criteria.push("completion.mr_url = ?"); parameters.push(mrAddress(mrUrl)); }
+    if (keys.length) {
+      criteria.push(`EXISTS (SELECT 1 FROM team_review_completion_issues AS linked WHERE linked.completion_id = completion.id AND linked.issue_key IN (${keys.map(() => "?").join(",")}))`);
+      parameters.push(...keys);
+    }
+    if (paths.length) {
+      criteria.push(`(EXISTS (SELECT 1 FROM team_review_completion_paths AS linked WHERE linked.completion_id = completion.id AND linked.changed_path IN (${paths.map(() => "?").join(",")}))${prefix === null ? "" : " AND substr(completion.mr_url, 1, ?) = ?"})`);
+      parameters.push(...paths);
+      if (prefix !== null) parameters.push(prefix.length, prefix);
+    }
+    const where = criteria.length ? `WHERE ${criteria.join(" OR ")}` : "";
+    const total = Number(this.db.prepare(`SELECT COUNT(*) AS count FROM team_review_completions AS completion ${where}`).get(...parameters).count);
+    const records = this.db.prepare(`SELECT completion.* FROM team_review_completions AS completion ${where}
+      ORDER BY completion.recorded_at DESC, completion.rowid DESC LIMIT ? OFFSET ?`).all(...parameters, limit, offset)
+      .map((row) => ({ ...JSON.parse(row.record_json), id: row.id, reviewKey: row.review_key, path: row.path }));
+    return { records, total, offset, nextOffset: offset + limit < total ? offset + limit : null };
   }
 
   beginWeeklyRun(weekStart, { now = Date.now(), leaseMs = 300_000 } = {}) {

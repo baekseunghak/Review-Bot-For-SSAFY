@@ -1,9 +1,9 @@
 {
   "name": "mmp",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
-  "description": "Local GitLab review inbox, Jira team context, weekly summaries, and Mattermost MCP server",
+  "description": "Local GitLab review inbox, cumulative review memory, Jira team context, weekly summaries, and Mattermost MCP server",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/baekseunghak/Review-Bot-For-SSAFY.git"
