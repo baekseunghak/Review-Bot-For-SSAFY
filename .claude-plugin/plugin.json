@@ -1,0 +1,15 @@
+{
+  "name": "mmp",
+  "displayName": "Review Bot for SSAFY",
+  "version": "0.7.0",
+  "description": "Collect GitLab review requests, prepare Jira team context and weekly summaries, and manage Mattermost messages.",
+  "author": {
+    "name": "baekseunghak",
+    "url": "https://github.com/baekseunghak"
+  },
+  "homepage": "https://github.com/baekseunghak/Review-Bot-For-SSAFY#readme",
+  "repository": "https://github.com/baekseunghak/Review-Bot-For-SSAFY",
+  "keywords": ["mattermost", "mcp", "review"],
+  "skills": "./skills/",
+  "mcpServers": "./claude-mcp.json"
+}

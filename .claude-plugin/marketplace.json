@@ -1,0 +1,14 @@
+{
+  "name": "mmp-local",
+  "owner": {
+    "name": "baekseunghak"
+  },
+  "description": "Local marketplace for Review Bot for SSAFY.",
+  "plugins": [
+    {
+      "name": "mmp",
+      "source": ".",
+      "description": "GitLab review inbox, Jira team context, and Mattermost tools"
+    }
+  ]
+}

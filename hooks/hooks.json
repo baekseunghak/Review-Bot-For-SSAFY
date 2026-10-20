@@ -1,0 +1,28 @@
+{
+  "description": "MMP MR 리뷰 가드레일. glab의 되돌릴 수 없는 MR 조작을 막고, prepare → record → post → notify 순서를 강제한다.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/mr-review.mjs", "gate"],
+            "if": "Bash(glab *)",
+            "timeout": 10,
+            "statusMessage": "MR 리뷰 가드레일 확인 중"
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/mr-review.mjs", "gate"],
+            "if": "Bash(node *)",
+            "timeout": 10,
+            "statusMessage": "MR 리뷰 단계 확인 중"
+          }
+        ]
+      }
+    ]
+  }
+}

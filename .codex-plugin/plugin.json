@@ -1,0 +1,38 @@
+{
+  "name": "mmp",
+  "version": "0.7.0",
+  "description": "Collect GitLab review requests, prepare Jira team context, save weekly summaries, and manage Mattermost messages.",
+  "author": {
+    "name": "baekseunghak",
+    "url": "https://github.com/baekseunghak"
+  },
+  "homepage": "https://github.com/baekseunghak/Review-Bot-For-SSAFY#readme",
+  "repository": "https://github.com/baekseunghak/Review-Bot-For-SSAFY",
+  "keywords": [
+    "mattermost",
+    "mcp",
+    "review"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Review Bot for SSAFY",
+    "shortDescription": "GitLab 리뷰 수신함과 Jira 팀 맥락·주간 요약 관리",
+    "longDescription": "GitLab 리뷰 요청을 모으고 여섯 명의 Jira 작업과 담당 영역을 최신화해 리뷰 맥락과 주간 요약을 제공합니다. Mattermost 메시지와 DM도 관리합니다.",
+    "developerName": "baekseunghak",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/baekseunghak/Review-Bot-For-SSAFY",
+    "defaultPrompt": [
+      "등록된 Mattermost 채널 목록을 보여줘.",
+      "리뷰 요청 mm 메시지를 미리보기 해줘.",
+      "등록된 사람과 GitLab-Mattermost 매핑을 보여줘."
+    ],
+    "brandColor": "#0058CC",
+    "composerIcon": "./assets/mmp-icon.png",
+    "logo": "./assets/mmp-icon.png"
+  }
+}
