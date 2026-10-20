@@ -271,6 +271,33 @@ test("equivalent timestamp offsets compare in UTC and preserve sub-millisecond o
   assert.equal(instance.listPending()[0].headSha, B);
 });
 
+test("legacy GitLab timestamps preserve UTC, offset and nanosecond revision ordering", (t) => {
+  const { instance } = inbox(t);
+  send(instance, mr({ description: "@reviewer", updated_at: "2041-03-12 03:04:05 UTC" }));
+  send(instance, mr({ updated_at: "2041-03-12 12:04:05.000000001 +0900", last_commit: { id: B } }));
+  assert.equal(instance.listPending()[0].headSha, B);
+  send(instance, mr({ updated_at: "2041-03-11 22:34:05.000000002 -0430", last_commit: { id: C } }));
+  assert.equal(instance.listPending()[0].headSha, C);
+  send(instance, mr({ action: "close", state: "closed", updated_at: "2041-03-12T03:04:05.000000001Z", last_commit: { id: B } }));
+  assert.equal(instance.listPending()[0].headSha, C);
+  send(instance, mr({ updated_at: "2041-03-12T03:04:05.000000002Z", last_commit: { id: A } }));
+  assert.equal(instance.listPending()[0].headSha, C);
+  send(instance, note("@reviewer", {}, { iid: 8, updated_at: "2041-03-12 03:04:05.123456789 UTC" }));
+  assert.equal(instance.status().pending, 2);
+});
+
+test("legacy timestamps reject invalid dates, clock fields, zones and ambiguous formats before storage", (t) => {
+  const { instance } = inbox(t);
+  for (const updated_at of [
+    "2041-02-30 03:04:05 UTC", "2041-03-12 24:04:05 UTC", "2041-03-12 03:60:05 UTC", "2041-03-12 03:04:60 UTC",
+    "2041-03-12 03:04:05 +2400", "2041-03-12 03:04:05 +0960", "2041-03-12 03:04:05 KST",
+    "2041-03-12 03:04:05", "2041-03-12T03:04:05 +0900", "2041-03-12 03:04:05 +09:00",
+    "2041-03-12 03:04:05.1234567890 UTC", "2041-03-12 03:04:05 UTC trailing",
+  ]) assert.throws(() => send(instance, mr({ updated_at })), UserError, updated_at);
+  assert.equal(instance.status().events, 0);
+  assert.equal(instance.status().pending, 0);
+});
+
 test("stored data and returned results omit payload text, names, email, titles and raw event IDs", (t) => {
   const { instance, directory } = inbox(t);
   const payload = mr({ description: "@reviewer private-body-sentinel", title: "private-title-sentinel" });

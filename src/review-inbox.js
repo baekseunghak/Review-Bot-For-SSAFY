@@ -31,6 +31,11 @@ function text(value, fallback = "") {
 function timestamp(value) {
   if (value === undefined || value === null) return null;
   if (typeof value !== "string") invalid();
+  const legacy = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?) (UTC|[+-]\d{4})$/.exec(value);
+  if (legacy) {
+    const zone = legacy[3] === "UTC" ? "Z" : `${legacy[3].slice(0, 3)}:${legacy[3].slice(3)}`;
+    value = `${legacy[1]}T${legacy[2]}${zone}`;
+  }
   const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(value);
   const parsed = Date.parse(value);
   if (!match || !Number.isFinite(parsed) || Number(match[2]) > 23 || Number(match[3]) > 59 || Number(match[4]) > 59) invalid();

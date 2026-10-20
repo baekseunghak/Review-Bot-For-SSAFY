@@ -111,6 +111,32 @@ test("이름 변경·새 파일·삭제 파일은 해당 커밋과 정확한 경
   assert.ok(files.includes(`projects/12/repository/files/new.js?ref=${headSha}`));
 });
 
+test("신규·삭제 파일의 없는 쪽 모드 0을 허용하고 실제 파일만 읽는다", async () => {
+  const diffs = [diff({ old_path: "added.js", new_path: "added.js", new_file: true, a_mode: "0" }),
+    diff({ old_path: "deleted.js", new_path: "deleted.js", deleted_file: true, b_mode: "0" })];
+  const { client, calls } = fixture({ metadata: mr({ changes_count: "2" }), diffs });
+  const result = await client.readReview(input);
+  assert.equal(result.files[0].oldMode, "0");
+  assert.equal(result.files[0].baseContent, null);
+  assert.equal(result.files[1].newMode, "0");
+  assert.equal(result.files[1].headContent, null);
+  const files = calls.filter((call) => call.endpoint.includes("/repository/files/")).map((call) => call.endpoint);
+  assert.deepEqual(files, [`projects/12/repository/files/added.js?ref=${headSha}`,
+    `projects/12/repository/files/deleted.js?ref=${baseSha}`]);
+});
+
+test("모드 0은 없는 쪽에만 허용하고 서브모듈·바이너리 검증을 유지한다", async () => {
+  for (const changedFile of [diff({ a_mode: "0" }), diff({ b_mode: "0" }),
+    diff({ new_file: true, b_mode: "0" }), diff({ deleted_file: true, a_mode: "0" }),
+    diff({ new_file: true, a_mode: null }), diff({ deleted_file: true, b_mode: "" })]) {
+    await assert.rejects(fixture({ diffs: [changedFile] }).client.readReview(input), { code: "invalid_gitlab_response" });
+  }
+  await assert.rejects(fixture({ diffs: [diff({ new_file: true, a_mode: "0", b_mode: "160000" })] })
+    .client.readReview(input), { code: "unsupported_content" });
+  await assert.rejects(fixture({ diffs: [diff({ new_file: true, a_mode: "0" })], contents: () => Buffer.from([0, 1]) })
+    .client.readReview(input), { code: "unsupported_content" });
+});
+
 test("diff와 댓글은 다음 페이지까지 빠짐없이 조회한다", async () => {
   const diffs = Array.from({ length: 101 }, (_, index) => diff({ old_path: `src/${index}.js`, new_path: `src/${index}.js` }));
   const notes = Array.from({ length: 101 }, (_, id) => ({ id: id + 1, body: `note ${id}`, author: { id: 8 }, system: false }));

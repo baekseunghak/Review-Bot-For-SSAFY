@@ -181,7 +181,8 @@ export class GitlabReviewClient {
       const oldPath = path(diff.old_path);
       const newPath = path(diff.new_path);
       if ([diff.new_file, diff.deleted_file, diff.renamed_file].some((value) => typeof value !== "boolean")
-        || !/^\d{6}$/.test(diff.a_mode ?? "") || !/^\d{6}$/.test(diff.b_mode ?? "")) {
+        || (!/^\d{6}$/.test(diff.a_mode ?? "") && !(diff.new_file && diff.a_mode === "0"))
+        || (!/^\d{6}$/.test(diff.b_mode ?? "") && !(diff.deleted_file && diff.b_mode === "0"))) {
         fail("invalid_gitlab_response", "GitLab changed file metadata is invalid.");
       }
       const key = `${oldPath}\0${newPath}`;
