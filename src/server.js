@@ -5,12 +5,19 @@ import { MattermostService, UserError } from "./core.js";
 import { ReviewInbox } from "./review-inbox.js";
 import { TeamContextService } from "./team-context.js";
 import { prepareMrContext } from "./gitlab-context.js";
+import { workerSettings } from "./review-worker-config.js";
+import { createConfiguredReviewWorker } from "./review-worker.js";
 import pkg from "../package.json" with { type: "json" };
 
 const service = new MattermostService();
-const reviewInbox = new ReviewInbox({ dataDir: service.dataDir });
+let automaticSettings;
+try { automaticSettings = workerSettings(); }
+catch { automaticSettings = { enabled: false, ready: false, missing: [], projectIds: [], error: "invalid_worker_settings" }; }
+const reviewInbox = new ReviewInbox({ dataDir: service.dataDir, projectIds: automaticSettings.projectIds });
 const teamContext = new TeamContextService({ dataDir: service.dataDir });
 const stopWeeklyScheduler = teamContext.startWeeklyScheduler();
+const automaticWorker = automaticSettings.ready ? createConfiguredReviewWorker({ inbox: reviewInbox, contextService: teamContext, mattermost: service, settings: automaticSettings }) : null;
+automaticWorker?.start();
 const server = new McpServer({ name: "mmp", version: pkg.version });
 
 const name = z.string().trim().min(1).max(64).regex(/^[\p{L}\p{N}](?:[\p{L}\p{N} ._-]*[\p{L}\p{N}._-])?$/u);
@@ -77,6 +84,19 @@ register("review_pending_list", {
   description: "Read pending GitLab review requests captured by the local receiver. Results contain identifiers, reviewed candidate SHA, and trigger reasons, not original comment bodies.",
   inputSchema: z.object({ limit: z.int().min(1).max(100).optional().default(20) }), annotations: readOnly,
 }, (args) => reviewInbox.listPending(args));
+
+register("review_worker_status", {
+  description: "Show automatic-review configuration readiness and durable job stages/errors without private review bodies. The enabled worker processes authenticated webhook requests through code review, memory, MR comment and author Mattermost DM. It never approves or merges an MR. Notification delivery marked unknown needs an explicit retry choice.",
+  inputSchema: z.object({ limit: z.int().min(1).max(100).optional().default(20) }), annotations: readOnly,
+}, ({ limit }) => ({ enabled: automaticSettings.enabled, configured: automaticSettings.ready,
+  missing: automaticSettings.missing, ...(automaticSettings.error ? { error: automaticSettings.error } : {}),
+  active: Boolean(automaticWorker?.task), lastResult: automaticWorker?.lastResult ?? null, ...reviewInbox.workerStatus({ limit }) }));
+
+register("review_job_retry", {
+  description: "Requeue a failed automatic-review job, preserving completed stages. An enabled worker will resume external posting/notification automatically. Set allow_notification_duplicate=true only when intentionally retrying an uncertain Mattermost delivery; it may already have arrived. This retries notification only and never republishes a completed MR comment.",
+  inputSchema: z.object({ request_id: z.int().positive(), allow_notification_duplicate: z.boolean().optional().default(false) }),
+  annotations: { ...mutate, openWorldHint: true },
+}, ({ request_id, allow_notification_duplicate }) => reviewInbox.retryFailed(request_id, { allowNotificationDuplicate: allow_notification_duplicate }));
 
 register("team_member_upsert", {
   description: "Register or replace a team review profile. There is no fixed team size or member-count cap. Use stable Jira accountId and GitLab numeric ID when available; paths are repository-relative directory or file prefixes. This stores local context only.",
@@ -333,6 +353,14 @@ register("message_send_dm", {
   text,
 }));
 
-process.once("SIGINT", () => { stopWeeklyScheduler(); teamContext.close(); reviewInbox.close(); service.close(); process.exit(0); });
-process.once("SIGTERM", () => { stopWeeklyScheduler(); teamContext.close(); reviewInbox.close(); service.close(); process.exit(0); });
+let stopping = false;
+async function shutdown() {
+  if (stopping) return;
+  stopping = true;
+  stopWeeklyScheduler();
+  await automaticWorker?.stop();
+  teamContext.close(); reviewInbox.close(); service.close(); process.exit(0);
+}
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
 void serveStdio(() => server);

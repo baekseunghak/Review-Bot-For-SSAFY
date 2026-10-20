@@ -1,7 +1,7 @@
 {
   "name": "mmp",
-  "version": "0.8.0",
-  "description": "Collect GitLab review requests, retain cumulative review memory, prepare Jira team context, save weekly summaries, and manage Mattermost messages.",
+  "version": "0.9.0",
+  "description": "Process GitLab review requests through code review, cumulative Jira context, MR comments and Mattermost notifications.",
   "author": {
     "name": "baekseunghak",
     "url": "https://github.com/baekseunghak"
@@ -17,8 +17,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Review Bot for SSAFY",
-    "shortDescription": "GitLab 리뷰 수신함과 Jira 팀 맥락·주간 요약 관리",
-    "longDescription": "GitLab 리뷰 요청을 모으고 등록 팀원의 Jira 작업과 담당 영역을 최신화해 리뷰 맥락과 주간 요약을 제공합니다. 구현 방식과 결정 이유를 누적해 다음 리뷰에 반영하고 Mattermost 메시지와 DM도 관리합니다.",
+    "shortDescription": "GitLab 자동 리뷰·댓글·알림과 Jira 작업 맥락 관리",
+    "longDescription": "GitLab 웹훅 요청부터 코드 리뷰·MR 댓글·Mattermost 작성자 알림까지 자동 처리합니다. 등록 팀원의 Jira 작업과 담당 영역을 최신화하고 구현 방식과 결정 이유를 누적해 다음 리뷰에 반영합니다. 자동 실행은 별도 설정으로 활성화합니다.",
     "developerName": "baekseunghak",
     "category": "Productivity",
     "capabilities": [
@@ -27,6 +27,7 @@
     ],
     "websiteURL": "https://github.com/baekseunghak/Review-Bot-For-SSAFY",
     "defaultPrompt": [
+      "자동 리뷰 설정과 작업 상태를 확인해줘.",
       "등록된 Mattermost 채널 목록을 보여줘.",
       "리뷰 요청 mm 메시지를 미리보기 해줘.",
       "등록된 사람과 GitLab-Mattermost 매핑을 보여줘."

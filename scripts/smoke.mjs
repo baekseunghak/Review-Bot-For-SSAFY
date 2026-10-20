@@ -50,9 +50,11 @@ try {
   assert.equal(initialized.result.serverInfo.name, "mmp");
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
   const listed = await request(2, "tools/list");
-  assert.equal(listed.result.tools.length, 32);
+  assert.equal(listed.result.tools.length, 34);
   assert.ok(listed.result.tools.some((tool) => tool.name === "review_inbox_status"));
   assert.ok(listed.result.tools.some((tool) => tool.name === "review_pending_list"));
+  assert.ok(listed.result.tools.some((tool) => tool.name === "review_worker_status"));
+  assert.ok(listed.result.tools.some((tool) => tool.name === "review_job_retry"));
   for (const name of ["team_member_upsert", "team_member_list", "team_sync", "team_member_context", "team_weekly_summary", "review_context_prepare", "review_context_complete", "review_history_list"]) {
     assert.ok(listed.result.tools.some((tool) => tool.name === name));
   }

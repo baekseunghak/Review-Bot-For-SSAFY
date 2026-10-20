@@ -1,8 +1,8 @@
 {
   "name": "mmp",
   "displayName": "Review Bot for SSAFY",
-  "version": "0.8.0",
-  "description": "Collect GitLab review requests, retain cumulative review memory, prepare Jira team context and weekly summaries, and manage Mattermost messages.",
+  "version": "0.9.0",
+  "description": "Process GitLab review requests through code review, cumulative Jira context, MR comments and Mattermost notifications.",
   "author": {
     "name": "baekseunghak",
     "url": "https://github.com/baekseunghak"

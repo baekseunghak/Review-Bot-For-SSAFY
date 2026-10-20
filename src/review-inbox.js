@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -137,6 +137,31 @@ function fingerprint(eventType, eventId, payload) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function workerTime(value = new Date()) {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(parsed.getTime())) throw new UserError("Invalid worker time.");
+  return parsed.toISOString();
+}
+
+function workerDuration(value, maximum = 86_400_000) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) throw new UserError("Invalid worker duration.");
+  return value;
+}
+
+function workerWord(value) {
+  if (typeof value !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(value)) throw new UserError("Invalid worker state.");
+  return value;
+}
+
+function workerArtifact(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new UserError("Invalid worker artifact.");
+  let encoded;
+  try { encoded = JSON.stringify(value); } catch { throw new UserError("Invalid worker artifact."); }
+  if (typeof encoded !== "string" || !encoded.startsWith("{")) throw new UserError("Invalid worker artifact.");
+  if (Buffer.byteLength(encoded, "utf8") > 262_144) throw new UserError("Worker artifact exceeds its storage limit.");
+  return encoded;
+}
+
 export class ReviewInbox {
   constructor({ dataDir, username = "", userId = null, botUserId = null, projectIds = [] } = {}) {
     if (typeof username !== "string" || (username && !USERNAME.test(username))) invalid();
@@ -177,6 +202,18 @@ export class ReviewInbox {
         status TEXT NOT NULL CHECK (status IN ('pending', 'held', 'superseded', 'cancelled')),
         created_at TEXT NOT NULL,
         UNIQUE (project_id, mr_iid, head_sha)
+      );
+      CREATE TABLE IF NOT EXISTS review_executions (
+        request_id INTEGER PRIMARY KEY REFERENCES review_requests(id),
+        status TEXT NOT NULL CHECK (status IN ('running', 'retry', 'completed', 'failed')),
+        stage TEXT NOT NULL,
+        artifact TEXT NOT NULL,
+        attempts INTEGER NOT NULL,
+        lease_token TEXT,
+        lease_expires_at TEXT,
+        next_attempt_at TEXT,
+        error_code TEXT,
+        updated_at TEXT NOT NULL
       );
     `);
     try { chmodSync(join(directory, "reviews.sqlite3"), 0o600); } catch { /* Windows uses inherited ACLs. */ }
@@ -231,6 +268,13 @@ export class ReviewInbox {
           .run(current.projectId, current.mrIid, current.headSha, JSON.stringify(requestReasons), current.draft ? "held" : "pending", new Date().toISOString());
         const request = this.db.prepare("SELECT id FROM review_requests WHERE project_id = ? AND mr_iid = ? AND head_sha = ?")
           .get(current.projectId, current.mrIid, current.headSha);
+        const resumed = newer && current.state === "opened" && !current.draft;
+        if (resumed) {
+          this.db.prepare(`UPDATE review_executions SET status = 'retry', stage = 'queued', artifact = '{}', attempts = 0,
+            lease_token = NULL, lease_expires_at = NULL, next_attempt_at = '1970-01-01T00:00:00.000Z',
+            error_code = NULL, updated_at = ? WHERE request_id = ? AND status = 'completed' AND stage = 'skipped'`)
+            .run(new Date().toISOString(), request.id);
+        }
         result = { status: current.draft ? "held" : "queued", requestId: Number(request.id) };
       }
       this.db.exec("COMMIT");
@@ -244,7 +288,7 @@ export class ReviewInbox {
   status() {
     const count = (sql) => Number(this.db.prepare(sql).get().count);
     return {
-      pending: count("SELECT COUNT(*) AS count FROM review_requests WHERE status = 'pending'"),
+      pending: count("SELECT COUNT(*) AS count FROM review_requests r WHERE status = 'pending' AND NOT EXISTS (SELECT 1 FROM review_executions e WHERE e.request_id = r.id AND e.status IN ('completed', 'failed'))"),
       tracked: count("SELECT COUNT(*) AS count FROM review_merge_requests WHERE tracked = 1"),
       held: count("SELECT COUNT(*) AS count FROM review_requests WHERE status = 'held'"),
       closed: count("SELECT COUNT(*) AS count FROM review_merge_requests WHERE tracked = 1 AND state IN ('closed', 'merged')"),
@@ -254,8 +298,164 @@ export class ReviewInbox {
 
   listPending({ limit = 20 } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new UserError("limit must be an integer between 1 and 100.");
-    return this.db.prepare("SELECT id, project_id, mr_iid, head_sha, reasons FROM review_requests WHERE status = 'pending' ORDER BY id LIMIT ?").all(limit)
+    return this.db.prepare("SELECT id, project_id, mr_iid, head_sha, reasons FROM review_requests r WHERE status = 'pending' AND NOT EXISTS (SELECT 1 FROM review_executions e WHERE e.request_id = r.id AND e.status IN ('completed', 'failed')) ORDER BY id LIMIT ?").all(limit)
       .map((row) => ({ requestId: Number(row.id), projectId: row.project_id, mrIid: row.mr_iid, headSha: row.head_sha, reasons: JSON.parse(row.reasons) }));
+  }
+
+  claimNext({ now = new Date(), leaseMs = 300_000 } = {}) {
+    const at = workerTime(now);
+    const expiresAt = new Date(Date.parse(at) + workerDuration(leaseMs)).toISOString();
+    if (!this.projectIds.size) return null;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const allowed = [...this.projectIds];
+      this.db.prepare(`UPDATE review_executions AS e SET status = 'completed', stage = 'skipped',
+        lease_token = NULL, lease_expires_at = NULL, next_attempt_at = NULL,
+        error_code = 'request_obsolete', updated_at = ?
+        WHERE e.stage NOT IN ('posting', 'posted', 'notifying', 'notification_unknown')
+          AND (e.status = 'retry' OR (e.status = 'running' AND e.lease_expires_at <= ?))
+          AND EXISTS (SELECT 1 FROM review_requests r JOIN review_merge_requests m
+            ON m.project_id = r.project_id AND m.mr_iid = r.mr_iid
+            WHERE r.id = e.request_id AND r.project_id IN (${allowed.map(() => "?").join(",")})
+              AND (r.status <> 'pending' OR m.state <> 'opened' OR m.draft <> 0 OR m.head_sha IS NOT r.head_sha))`)
+        .run(at, at, ...allowed);
+      const row = this.db.prepare(`SELECT r.*, e.stage, e.artifact, e.attempts FROM review_requests r
+        JOIN review_merge_requests m ON m.project_id = r.project_id AND m.mr_iid = r.mr_iid
+        LEFT JOIN review_executions e ON e.request_id = r.id
+        WHERE ((r.status = 'pending' AND m.state = 'opened' AND m.draft = 0 AND m.head_sha = r.head_sha)
+            OR e.stage IN ('posting', 'posted', 'notifying', 'notification_unknown'))
+          AND r.project_id IN (${allowed.map(() => "?").join(",")})
+          AND (e.request_id IS NULL OR (e.status = 'retry' AND e.next_attempt_at <= ?)
+            OR (e.status = 'running' AND e.lease_expires_at <= ?))
+        ORDER BY r.id LIMIT 1`).get(...allowed, at, at);
+      if (!row) { this.db.exec("COMMIT"); return null; }
+      const leaseToken = randomUUID();
+      const attempt = Number(row.attempts ?? 0) + 1;
+      const stage = row.stage ?? "queued";
+      const artifact = row.artifact ?? "{}";
+      this.db.prepare(`INSERT INTO review_executions
+        (request_id, status, stage, artifact, attempts, lease_token, lease_expires_at, updated_at)
+        VALUES (?, 'running', ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(request_id) DO UPDATE SET status = 'running', attempts = excluded.attempts,
+          lease_token = excluded.lease_token, lease_expires_at = excluded.lease_expires_at,
+          next_attempt_at = NULL, updated_at = excluded.updated_at`)
+        .run(row.id, stage, artifact, attempt, leaseToken, expiresAt, at);
+      this.db.exec("COMMIT");
+      return {
+        id: Number(row.id), requestId: Number(row.id), projectId: row.project_id,
+        mrIid: row.mr_iid, headSha: row.head_sha, reasons: JSON.parse(row.reasons),
+        leaseToken, leaseExpiresAt: expiresAt, attempt, stage, artifact: JSON.parse(artifact),
+      };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  activeClaim(requestId, token, at) {
+    id(requestId);
+    if (typeof token !== "string" || !/^[a-f\d-]{36}$/i.test(token)) throw new UserError("Invalid worker claim.");
+    const row = this.db.prepare(`SELECT * FROM review_executions WHERE request_id = ?
+      AND status = 'running' AND lease_token = ? AND lease_expires_at > ?`).get(requestId, token, at);
+    if (!row) throw new UserError("Review worker claim has expired or is no longer owned.");
+    return row;
+  }
+
+  renewClaim(requestId, token, { now = new Date(), leaseMs = 300_000 } = {}) {
+    const at = workerTime(now);
+    const expiresAt = new Date(Date.parse(at) + workerDuration(leaseMs)).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.activeClaim(requestId, token, at);
+      this.db.prepare("UPDATE review_executions SET lease_expires_at = ?, updated_at = ? WHERE request_id = ?")
+        .run(expiresAt, at, requestId);
+      this.db.exec("COMMIT");
+      return { leaseExpiresAt: expiresAt };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  isCurrent(requestId, token, { now = new Date() } = {}) {
+    const at = workerTime(now);
+    try { this.activeClaim(requestId, token, at); } catch (error) {
+      if (error instanceof UserError) return false;
+      throw error;
+    }
+    const row = this.db.prepare(`SELECT r.project_id FROM review_requests r
+      JOIN review_merge_requests m ON m.project_id = r.project_id AND m.mr_iid = r.mr_iid
+      WHERE r.id = ? AND r.status = 'pending' AND m.state = 'opened' AND m.draft = 0 AND m.head_sha = r.head_sha`).get(requestId);
+    return Boolean(row && this.projectIds.has(row.project_id));
+  }
+
+  checkpoint(requestId, token, { stage, artifact = {}, now = new Date() } = {}) {
+    const at = workerTime(now);
+    workerWord(stage);
+    workerArtifact(artifact);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.activeClaim(requestId, token, at);
+      const merged = { ...JSON.parse(row.artifact), ...artifact };
+      this.db.prepare("UPDATE review_executions SET stage = ?, artifact = ?, updated_at = ? WHERE request_id = ?")
+        .run(stage, workerArtifact(merged), at, requestId);
+      this.db.exec("COMMIT");
+      return { stage, artifact: merged };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  finish(requestId, token, { now = new Date() } = {}) {
+    const at = workerTime(now);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.activeClaim(requestId, token, at);
+      this.db.prepare(`UPDATE review_executions SET status = 'completed', stage = CASE stage WHEN 'notifying' THEN 'completed' ELSE stage END, lease_token = NULL,
+        lease_expires_at = NULL, next_attempt_at = NULL, error_code = NULL, updated_at = ? WHERE request_id = ?`).run(at, requestId);
+      this.db.exec("COMMIT");
+      return { status: "completed" };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  retry(requestId, token, { errorCode, delayMs = 60_000, maxAttempts = 5, now = new Date() } = {}) {
+    const at = workerTime(now);
+    workerWord(errorCode);
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 100) throw new UserError("Invalid worker attempt limit.");
+    const nextAt = new Date(Date.parse(at) + workerDuration(delayMs)).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.activeClaim(requestId, token, at);
+      const status = row.attempts >= maxAttempts ? "failed" : "retry";
+      this.db.prepare(`UPDATE review_executions SET status = ?, lease_token = NULL, lease_expires_at = NULL,
+        next_attempt_at = ?, error_code = ?, updated_at = ? WHERE request_id = ?`)
+        .run(status, status === "retry" ? nextAt : null, errorCode, at, requestId);
+      this.db.exec("COMMIT");
+      return { status, nextAttemptAt: status === "retry" ? nextAt : null };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  retryFailed(requestId, { allowNotificationDuplicate = false, now = new Date() } = {}) {
+    id(requestId);
+    const at = workerTime(now);
+    if (typeof allowNotificationDuplicate !== "boolean") throw new UserError("Invalid notification retry choice.");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM review_executions WHERE request_id = ? AND status = 'failed'").get(requestId);
+      if (!row) throw new UserError("Only a failed review execution can be retried.");
+      const uncertain = ["notifying", "notification_unknown"].includes(row.stage);
+      if (uncertain && !allowNotificationDuplicate) throw new UserError("Notification delivery is uncertain; retry requires explicit duplicate-delivery permission.");
+      const stage = uncertain ? "posted" : row.stage;
+      this.db.prepare(`UPDATE review_executions SET status = 'retry', stage = ?, attempts = 0,
+        lease_token = NULL, lease_expires_at = NULL, next_attempt_at = ?, error_code = NULL,
+        updated_at = ? WHERE request_id = ?`).run(stage, at, at, requestId);
+      this.db.exec("COMMIT");
+      return { requestId, status: "retry", stage, nextAttemptAt: at };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  workerStatus({ limit = 20 } = {}) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new UserError("limit must be an integer between 1 and 100.");
+    const counts = { running: 0, retry: 0, completed: 0, failed: 0 };
+    for (const row of this.db.prepare("SELECT status, COUNT(*) AS count FROM review_executions GROUP BY status").all()) counts[row.status] = Number(row.count);
+    const jobs = this.db.prepare(`SELECT request_id, stage, status, attempts, error_code, next_attempt_at
+      FROM review_executions ORDER BY updated_at DESC, request_id DESC LIMIT ?`).all(limit).map((row) => ({
+      requestId: Number(row.request_id), stage: row.stage, status: row.status,
+      attempt: Number(row.attempts), lastErrorCode: row.error_code, nextAttemptAt: row.next_attempt_at,
+    }));
+    return { counts, jobs };
   }
 
   close() {

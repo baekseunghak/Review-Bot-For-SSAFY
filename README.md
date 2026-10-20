@@ -1,6 +1,6 @@
 # Review Bot for SSAFY
 
-GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하기 위한 로컬 MCP 서버입니다. 팀원별 담당 영역·작업 이력을 보관하고, 리뷰 직전에 최신 자료를 모아 리뷰를 수행하는 대화에 전달합니다. 리뷰를 마치면 구현 방식·결정 이유·검증·남은 작업을 비공개로 누적해 다음 리뷰에 자동 참조합니다. Mattermost 메시지 관리·전송과 GitLab 웹훅 수신함도 제공합니다.
+GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하기 위한 로컬 MCP 서버입니다. 팀원별 담당 영역·작업 이력을 보관하고, 리뷰 직전에 최신 자료를 모읍니다. 자동 처리를 켜면 웹훅 요청에서 코드 리뷰, 비공개 기록 저장, MR 댓글 게시, 작성자 Mattermost DM까지 이어집니다. 리뷰를 마치면 구현 방식·결정 이유·검증·남은 작업을 누적해 다음 리뷰에 자동 참조합니다.
 
 이 프로젝트는 [kdHyeok/MMP](https://github.com/kdHyeok/MMP/tree/943ae776026daa4ec8d230f0fb65ddd35ea8c6f2)를 확장했습니다. 호환성을 위해 패키지·플러그인 이름 `mmp`를 유지합니다. 확장 소스는 [baekseunghak/Review-Bot-For-SSAFY](https://github.com/baekseunghak/Review-Bot-For-SSAFY)에서 받으세요. 원본 MMP만 설치하면 새 Jira·수신함 도구가 포함되지 않습니다.
 
@@ -18,6 +18,7 @@ GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하�
 - [10. Jira 동기화와 월요일 주간 요약](#10-jira-동기화와-월요일-주간-요약)
 - [11. 작업 맥락을 사용해 MR 리뷰하기](#11-작업-맥락을-사용해-mr-리뷰하기)
 - [12. GitLab 웹훅 수신기 연결](#12-gitlab-웹훅-수신기-연결)
+- [12-5. 웹훅부터 리뷰·댓글·DM까지 자동 처리](#12-5-웹훅부터-리뷰댓글dm까지-자동-처리)
 - [13. Mattermost 설정](#13-mattermost-설정)
 - [14. 기존 Claude Code 리뷰 흐름](#14-기존-claude-code-리뷰-흐름)
 - [15. 전체 MCP 도구](#15-전체-mcp-도구)
@@ -30,7 +31,7 @@ GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하�
 
 | 기능 | 현재 상태 |
 |---|---|
-| 로컬 stdio MCP | 구현됨. 도구 32개 제공 |
+| 로컬 stdio MCP | 구현됨. 도구 34개 제공 |
 | Mattermost 웹훅·채널·사람·템플릿 관리와 메시지 전송 | 구현됨. 실제 전송에는 별도 설정 필요 |
 | GitLab 웹훅 수신·인증·중복 제거·SQLite 수신함 | 구현됨. 별도 수신 프로세스 실행 필요 |
 | MR 설명 멘션·댓글 멘션·리뷰어 지정 감지 | 구현됨. 지정한 계정과 허용 프로젝트에 적용 |
@@ -41,7 +42,8 @@ GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하�
 | 리뷰 직전 MR·Jira 최신화와 등록 팀원의 관점 구성 | 구현됨. `review_context_prepare` 사용 |
 | 리뷰 완료 시 구현·결정 이유·검증·남은 작업 누적 | 구현됨. `review_context_complete`로 비공개 저장 |
 | 다음 리뷰에서 관련 누적 기록 자동 참조 | 구현됨. 준비 응답의 `reviewHistory`, 추가 조회는 `review_history_list` |
-| 새 수신함 → 모델 리뷰 → MR 댓글 → Mattermost 전체 자동 처리 | 아직 연결되지 않음 |
+| 새 수신함 → 코드 리뷰 → MR 댓글 → 작성자 Mattermost DM | 구현됨. 기본 비활성, 별도 CLI·계정·전송 설정 필요 |
+| 작업 선점·만료 복구·단계별 재시도·상태 조회 | 구현됨. 게시 댓글 중복을 확인하고 불명 알림은 자동 재전송하지 않음 |
 | 새 수신함의 5분 API 폴링·웹훅 누락 복구 | 아직 구현되지 않음 |
 | 공개 HTTPS 수신 주소·호스팅·상시 서비스 설치 | 사용자가 별도 준비 |
 
@@ -49,7 +51,7 @@ GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하�
 
 인원 상한이 없다는 것은 무제한 성능을 보장한다는 뜻이 아닙니다. 인원이 늘면 Jira 조회량과 처리 시간이 늘며, 이슈·페이지·설명 길이·도구 실행 시간 제한은 그대로 적용됩니다.
 
-별도 모델 API 키는 이 서버의 필수 설정이 아닙니다. 코드를 읽고 판단하는 일은 연결된 MCP 클라이언트의 대화가 수행합니다. 서버가 독립적으로 모델을 실행하지는 않습니다.
+수동 MCP 사용에는 별도 모델 API 키가 필요하지 않습니다. 자동 리뷰는 로그인된 Claude Code CLI를 별도 프로세스로 실행하며 CLI의 인증·사용량을 사용합니다. 검토 자료에는 변경 diff·파일·MR 논의·Jira·과거 기록이 포함되므로 CLI가 연결한 모델 서비스에서 처리됩니다. 자동 리뷰를 사용하지 않으면 기존처럼 연결된 MCP 대화에서 직접 검토할 수 있습니다.
 
 ## 2. 동작 구조
 
@@ -60,16 +62,20 @@ GitLab ── 웹훅 POST ──> 공개 HTTPS 프록시/터널 ──> 로컬 �
                                                      │
 MCP 클라이언트 <── stdio ──> MCP 서버 ────────────────┘
                                 │
-                                ├── glab: MR 작성자·SHA·변경 경로
+                                ├── glab: MR·diff·base/head 파일·댓글
                                 ├── Jira Cloud: 작업·상태/담당 이력
                                 ├── SQLite + 개인별 Markdown 기록
-                                └── Mattermost: 설정한 메시지 전송
+                                └── 선택 자동 worker
+                                     ├── CLI 코드 리뷰 + 비공개 누적 저장
+                                     ├── GitLab MR 댓글 게시
+                                     └── Mattermost 작성자 DM
 ```
 
 - **MCP 서버**: `src/server.js`. MCP 클라이언트가 로컬 프로세스로 시작합니다. HTTP 접속 주소는 없습니다.
 - **웹훅 수신기**: `bin/gitlab-webhook.mjs`. 별도 터미널/서비스에서 실행하며 기본 주소는 `http://127.0.0.1:8765`입니다.
 - 두 프로세스의 `MATTERMOST_MCP_DATA_DIR`를 같은 절대 경로로 맞춥니다. 같은 사용자 PC 안에서 SQLite를 공유하는 구조입니다.
-- 웹훅 수신 성공은 리뷰 완료를 뜻하지 않습니다. 수신함과 실제 리뷰 수행은 현재 별도 단계입니다.
+- 자동 worker는 MCP 서버 안에서 실행하거나 `npm run worker:serve`로 따로 실행합니다. 같은 SQLite의 lease로 작업을 나누며 기본값은 비활성입니다.
+- 웹훅 수신 성공은 대기열 저장을 뜻합니다. 리뷰·게시·알림의 성공 여부는 `review_worker_status`에서 확인합니다.
 - 공개 GitHub에는 프로그램과 예시만 올립니다. 운영 토큰·개인별 업무 기록·SQLite는 각 설치 환경에 보관합니다.
 
 ## 3. 준비물과 설정 순서
@@ -82,8 +88,9 @@ MCP 클라이언트 <── stdio ──> MCP 서버 ─────────
 | npm | 의존성 설치·검증 | `npm --version` |
 | Git | 설치, 실제 코드 검토와 워크트리 | `git --version` |
 | 로컬 stdio를 지원하는 MCP 클라이언트 | MCP 도구 사용 | 클라이언트의 MCP 설정 확인 |
-| GitLab CLI `glab` | 실제 MR 맥락 조회, 기존 리뷰 하네스 | `glab --version` |
-| GitLab 계정과 대상 프로젝트 읽기 권한 | MR 조회·코드 검토 | [7절](#7-gitlab-계정과-프로젝트-확인) |
+| GitLab CLI `glab` | 실제 MR·코드 조회와 댓글 게시 | `glab --version` |
+| GitLab 계정과 대상 프로젝트 권한 | 조회 권한, 자동 게시에는 MR 댓글 작성 권한 | [7절](#7-gitlab-계정과-프로젝트-확인) |
+| Claude Code CLI 로그인 | 자동 리뷰를 켤 때 필요. 실제 실행 파일 권장 | `claude --version` |
 | Jira Cloud 계정·API 토큰·프로젝트 키 | 작업 동기화·주간 요약·팀 관점 리뷰 | [8절](#8-jira-cloud-연결) |
 | Mattermost Incoming Webhook | 메시지를 보낼 때만 필요 | [13절](#13-mattermost-설정) |
 | GitLab에서 접근 가능한 HTTPS 주소 | 실제 웹훅을 받을 때만 필요 | [12절](#12-gitlab-웹훅-수신기-연결) |
@@ -100,6 +107,7 @@ MCP 클라이언트 <── stdio ──> MCP 서버 ─────────
 6. `team_sync` → `team_member_context` → `team_weekly_summary`를 확인합니다.
 7. MR 한 건에 `review_context_prepare`를 호출해 코드 리뷰에 적용합니다.
 8. 필요하면 웹훅 수신기와 Mattermost를 각각 연결합니다.
+9. [자동 리뷰 설정](docs/AUTO-REVIEW.md)을 완료한 뒤 `REVIEWBOT_AUTO_REVIEW=1`로 worker를 시작합니다. 이후 허용 프로젝트의 요청은 별도 게시 확인 없이 댓글과 DM으로 이어집니다.
 
 Jira만 먼저 연결해도 됩니다. Mattermost 설정이나 공개 수신 주소가 없어도 팀 작업 동기화와 MR 맥락 준비를 사용할 수 있습니다.
 
@@ -119,7 +127,7 @@ npm run smoke:review
 | 명령 | 확인하는 것 |
 |---|---|
 | `npm test` | 원본 기능, Jira·팀 저장소·주간 요약·리뷰 단계, 로컬 HTTP/stdio 통합 |
-| `npm run smoke` | 별도 stdio 프로세스의 도구 32개와 기본 호출 |
+| `npm run smoke` | 별도 stdio 프로세스의 도구 34개와 기본 호출 |
 | `npm run smoke:review` | 인증된 가상 웹훅 → SQLite → stdio 조회, 중복과 새 커밋 |
 
 테스트는 임시 데이터와 모의 응답을 사용합니다. 운영 GitLab·Jira·Mattermost에 댓글·메시지를 보내지 않습니다. Windows에서 파일 심볼릭 링크 권한이 없으면 해당 검사 1개가 생략될 수 있습니다.
@@ -161,6 +169,14 @@ REVIEWBOT_GITLAB_BOT_USER_ID=456
 REVIEWBOT_GITLAB_PROJECT_IDS=100,200
 REVIEWBOT_WEBHOOK_SECRET="REPLACE_WITH_RANDOM_SECRET"
 REVIEWBOT_PORT=8765
+
+# 아래 설정을 켜면 대기 요청을 실제 리뷰하고 댓글·DM을 전송합니다.
+REVIEWBOT_AUTO_REVIEW=0
+REVIEWBOT_GITLAB_HOST=gitlab.example.com
+REVIEWBOT_MATTERMOST_CHANNEL=team-reviews
+REVIEWBOT_REVIEW_COMMAND=claude
+REVIEWBOT_REVIEW_TIMEOUT_MS=180000
+REVIEWBOT_WORKER_INTERVAL_MS=5000
 ```
 
 macOS·Linux에서는 데이터 경로를 `/home/you/.reviewbot/team-a`처럼 바꿉니다. `~`, `$HOME`, `${변수명}`이 자동 치환된다고 가정하지 말고 **실제 절대 경로**를 적으세요. 공백이나 `#`가 포함된 값은 따옴표로 감쌉니다. 사용하지 않는 선택 값은 비워 둡니다.
@@ -180,6 +196,12 @@ macOS·Linux에서는 데이터 경로를 `/home/you/.reviewbot/team-a`처럼 �
 | `REVIEWBOT_GITLAB_PROJECT_IDS` | 웹훅 수신 | 허용할 GitLab 숫자 프로젝트 ID를 쉼표로 구분. 비우면 수신 비활성 |
 | `REVIEWBOT_WEBHOOK_SECRET` | 웹훅 수신 | GitLab Secret token과 동일한 16~512자 공백 없는 ASCII 문자열 |
 | `REVIEWBOT_PORT` | 선택 | 로컬 수신 포트. 기본 `8765` |
+| `REVIEWBOT_AUTO_REVIEW` | 자동 리뷰 사용 | `1`일 때만 worker 시작. 기본 비활성 |
+| `REVIEWBOT_GITLAB_HOST` | 자동 리뷰 사용 | `gitlab.example.com` 같은 호스트명과 선택 포트. `https://`나 프로젝트 경로 제외 |
+| `REVIEWBOT_MATTERMOST_CHANNEL` | 자동 리뷰 사용 | 등록한 논리 채널 이름. 작성자 DM에 사용할 웹훅을 찾는 출처 |
+| `REVIEWBOT_REVIEW_COMMAND` | 선택 | 리뷰 CLI 실행 파일. 기본 `claude`, Windows는 실제 `.exe` 절대 경로 권장 |
+| `REVIEWBOT_REVIEW_TIMEOUT_MS` | 선택 | 모델 리뷰 제한 시간(ms). 기본 `180000` |
+| `REVIEWBOT_WORKER_INTERVAL_MS` | 선택 | 로컬 대기열 확인 간격(ms). 기본 `5000`, GitLab API 폴링 간격이 아님 |
 | `MATTERMOST_MCP_ALLOW_HTTP` | 선택 | 신뢰하는 로컬 Mattermost가 HTTP만 쓸 때 `1`. 기본 HTTPS |
 
 GitLab 환경변수는 **웹훅에서 누구의 요청을 감지할지** 정합니다. 팀원 프로필 등록을 대신하지 않습니다. GitLab 토큰도 이 변수에 넣지 않으며 실제 MR 조회 인증은 `glab`이 관리합니다.
@@ -465,7 +487,7 @@ MCP만 직접 등록했다면 이와 같이 최신화 도구 사용을 명시하
 
 ## 12. GitLab 웹훅 수신기 연결
 
-이 절은 요청을 **수집**하기 위한 설정입니다. 수신 후 자동 리뷰·게시까지 이어지는 기능은 현재 없습니다.
+수신기는 요청을 인증하고 SQLite에 저장합니다. [자동 worker](docs/AUTO-REVIEW.md)를 함께 실행하면 리뷰·댓글·DM으로 이어집니다.
 
 ### 12-1. 로컬 실행
 
@@ -530,6 +552,32 @@ https://reviewbot.example.com/webhooks/gitlab
 | `503` | 감지 계정·허용 프로젝트·비밀값 설정 미완료 |
 
 가상 이벤트 검증은 `npm run smoke:review`로 반복할 수 있습니다. 실제 GitLab 도달 여부는 HTTPS 경로를 만든 뒤 별도로 확인합니다. [이벤트 형식](https://docs.gitlab.com/user/project/integrations/webhook_events/), [수신함 상세](docs/LOCAL-REVIEW.md).
+
+### 12-5. 웹훅부터 리뷰·댓글·DM까지 자동 처리
+
+상세 설치와 복구 절차는 [자동 리뷰 운영](docs/AUTO-REVIEW.md)을 따릅니다. 자동 처리를 켜기 전에 다음 항목을 준비합니다.
+
+1. 같은 실행 계정에서 `glab`과 Claude Code CLI에 로그인합니다. 허용 GitLab 프로젝트에는 조회와 댓글 작성 권한이 필요합니다.
+2. 팀원 프로필·Jira 설정을 완료하고 `team_sync`가 성공하는지 확인합니다.
+3. [13절](#13-mattermost-설정)의 웹훅·논리 채널·작성자 참가자 매핑·`review-complete` 템플릿을 등록합니다. `REVIEWBOT_MATTERMOST_CHANNEL`에는 논리 채널 이름을 적습니다.
+4. `REVIEWBOT_GITLAB_HOST`와 기존 `REVIEWBOT_GITLAB_PROJECT_IDS`를 설정하고 `REVIEWBOT_AUTO_REVIEW=1`로 바꿉니다.
+5. MCP 클라이언트를 재시작하거나, 소스 루트에서 아래 별도 worker를 실행합니다. 수신기는 별도 프로세스로 계속 실행해야 합니다.
+
+```sh
+node --env-file=.env bin/review-worker.mjs
+```
+
+운영 환경변수를 이미 서비스에 전달했다면 `npm run worker:serve`도 같은 진입점을 실행합니다. `.env`는 npm 명령이 자동으로 읽지 않습니다. MCP와 별도 worker를 동시에 켜도 공유 lease로 한 요청을 선점하며, 데이터 경로가 서로 다르면 이 보장은 적용되지 않습니다.
+
+worker는 기본 5초마다 **로컬 SQLite 대기열**을 확인합니다. 모델은 명령·테스트를 실행하지 않고 수집한 자료만 검토합니다. 결과와 근거를 검증하고 비공개 누적 기록을 저장한 후, 현재 MR 상태와 SHA를 다시 확인하여 댓글을 게시합니다. MR 설명 양식은 바꾸지 않아도 됩니다. 판정의 `승인`은 댓글의 검토 결론이며 GitLab 승인·머지를 실행하지 않습니다.
+
+완료 DM은 MR 작성자의 GitLab 사용자명을 기존 Mattermost 참가자와 연결해 보냅니다. `REVIEWBOT_MATTERMOST_CHANNEL`은 웹훅 선택용이며 팀 채널에 리뷰 원문을 게시하는 설정이 아닙니다. DM에는 판정·SHA·게시 댓글 링크를 전달합니다. 알림 전송 여부가 불명확하면 `notification_unknown`으로 멈추고 자동 재전송하지 않습니다.
+
+```json
+{"limit":20}
+```
+
+위 인수로 `review_worker_status`를 호출해 단계·시도 횟수·오류 코드를 확인합니다. 설정을 고친 뒤 최종 실패 작업은 `review_job_retry({"request_id":123})`로 다시 대기시킬 수 있습니다. 불명 알림을 재전송하려면 실제 도착 여부를 확인하고 `allow_notification_duplicate: true`를 명시해야 합니다. 재시도는 worker가 켜져 있으면 실제 외부 쓰기로 이어질 수 있습니다.
 
 ## 13. Mattermost 설정
 
@@ -688,12 +736,13 @@ CLI를 직접 호출할 때 `prepare`가 반환한 `worktreePath`로 이동한 �
 
 ## 15. 전체 MCP 도구
 
-현재 총 32개입니다. 아래는 도구 이름이며 CLI 명령은 아닙니다.
+현재 총 34개입니다. 아래는 도구 이름이며 CLI 명령은 아닙니다.
 
 | 영역 | 도구 |
 |---|---|
 | 데이터 위치 | `storage_info` |
 | GitLab 수신함 | `review_inbox_status`, `review_pending_list` |
+| 자동 리뷰 운영 | `review_worker_status`, `review_job_retry` |
 | 팀 프로필 | `team_member_upsert`, `team_member_list` |
 | Jira·주간 요약 | `team_sync`, `team_member_context`, `team_weekly_summary` |
 | MR 최신 맥락 | `review_context_prepare` |
@@ -705,7 +754,7 @@ CLI를 직접 호출할 때 `prepare`가 반환한 `worktreePath`로 이동한 �
 | 메시지 템플릿 | `convention_create`, `convention_list`, `convention_update`, `convention_delete` |
 | 미리보기·전송 | `message_preview`, `message_send`, `message_send_dm` |
 
-`team_sync`, `team_weekly_summary`, `review_context_prepare`는 외부 자료를 읽고 로컬 파일을 갱신합니다. `review_context_complete`는 GitLab SHA를 읽어 확인하고 로컬 리뷰 기록을 저장하며, `review_history_list`는 저장된 기록을 조회합니다. `message_send`, `message_send_dm`은 실제 외부 메시지를 보냅니다. 수신함 조회 도구는 대기 작업을 실행하거나 완료로 처리하지 않습니다.
+`team_sync`, `team_weekly_summary`, `review_context_prepare`는 외부 자료를 읽고 로컬 파일을 갱신합니다. `review_context_complete`는 GitLab SHA를 읽어 확인하고 로컬 리뷰 기록을 저장하며, `review_history_list`는 저장된 기록을 조회합니다. `message_send`, `message_send_dm`은 실제 외부 메시지를 보냅니다. `review_worker_status`는 원문 없이 처리 상태를 반환합니다. `review_job_retry`는 최종 실패한 작업을 다시 대기시키므로 worker가 켜져 있으면 외부 게시·전송을 재개할 수 있습니다.
 
 ## 16. 저장 위치와 백업
 
@@ -755,7 +804,8 @@ SQLite가 원본이고 Markdown은 읽기 위한 자료입니다. 각 리뷰 워
 | GitLab 웹훅 접속 실패 | 외부 HTTPS·프록시·수신기·방화벽 확인. 외부에서 localhost 접속 불가 |
 | 웹훅 401 | Secret token·프록시 헤더 확인. Signing token만으로는 인증 불가 |
 | 웹훅 202인데 수신함이 비어 있음 | 응답 status/reason, 감지 계정·프로젝트·Draft/닫힘·멘션 제외 규칙 확인 |
-| 웹훅 수신 후 댓글이 안 달림 | 현재 자동 리뷰·게시 연결은 미구현. 수동 MR 맥락 준비부터 사용 |
+| 웹훅 수신 후 댓글이 안 달림 | `REVIEWBOT_AUTO_REVIEW=1`, 동일 데이터 경로, worker 실행과 `review_worker_status`의 단계·오류 확인 |
+| `notification_unknown` | 알림 전달 여부 불명. 실제 DM 도착을 확인하고 중복 가능성을 받아들일 때만 `allow_notification_duplicate: true`로 재시도 |
 | Mattermost 채널/DM 실패 | 채널 slug·접근 권한·웹훅 목적지 제한·수신자 매핑 확인 |
 | 리뷰 메시지 형식 오류 | 컨벤션 이름·멘션·MR 번호·Jira키·이모지·한 줄 message 확인 |
 | 두 클라이언트 설정이 다름 | `storage_info`의 `dataDir`, 설치 복사본/소스 경로 비교 |
@@ -796,6 +846,9 @@ claude mcp remove reviewbot --scope user
 | `src/server.js` | MCP 도구 스키마·등록 |
 | `src/core.js` | 기존 Mattermost 서비스·저장 |
 | `src/review-config.js`, `src/review-inbox.js` | 수신 설정·이벤트 필터·수신함 |
+| `src/review-worker-config.js`, `src/review-worker.js` | 자동 실행 설정·선점·리뷰·게시·알림·복구 |
+| `src/review-gitlab.js`, `src/review-runner.js`, `src/review-notifier.js` | GitLab 전체 자료/게시·CLI 검토·Mattermost 작성자 DM |
+| `bin/review-worker.mjs` | 별도 worker 실행 |
 | `bin/gitlab-webhook.mjs` | 로컬 HTTP 수신기 |
 | `src/jira-client.js` | Jira Cloud 조회·페이지 순회·이력 정규화 |
 | `src/team-context-store.js`, `src/team-context.js` | 팀 저장·관점 구성·주간 요약 |
@@ -819,4 +872,4 @@ claude mcp remove reviewbot --scope user
 
 원본 출처는 위 MMP 링크를 유지합니다. `skills/mr-review/checklists/LICENSE-open-code-review.txt`는 가져온 체크리스트의 별도 Apache 2.0 라이선스이며 저장소 전체의 라이선스를 뜻하지 않습니다. 루트 라이선스와 원본 사용 조건을 확인하기 전에는 전체 프로젝트에 MIT 등의 배지를 임의로 붙이지 않습니다.
 
-추가 기록은 [팀 작업 맥락](docs/TEAM-CONTEXT.md), [로컬 수신함](docs/LOCAL-REVIEW.md), [설계 기록](docs/CONTEXT.md), [기존 하네스](docs/review-harness.md)에 있습니다. 실제 계정 연결·HTTPS 수신·댓글 게시·Mattermost 도착·운영 환경의 최초 동기화 시간은 각 설치 환경에서 검증해야 합니다.
+추가 기록은 [자동 리뷰 설치·복구](docs/AUTO-REVIEW.md), [팀 작업 맥락](docs/TEAM-CONTEXT.md), [로컬 수신함](docs/LOCAL-REVIEW.md), [설계 기록](docs/CONTEXT.md), [기존 하네스](docs/review-harness.md)에 있습니다. 실제 계정 연결·HTTPS 수신·댓글 게시·Mattermost 도착·운영 환경의 최초 동기화 시간은 각 설치 환경에서 검증해야 합니다.

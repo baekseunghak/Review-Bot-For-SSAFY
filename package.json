@@ -1,9 +1,9 @@
 {
   "name": "mmp",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
-  "description": "Local GitLab review inbox, cumulative review memory, Jira team context, weekly summaries, and Mattermost MCP server",
+  "description": "Automatic GitLab code reviews, cumulative review memory, Jira team context and Mattermost notifications over MCP",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/baekseunghak/Review-Bot-For-SSAFY.git"
@@ -13,6 +13,7 @@
     "test": "node --test",
     "smoke": "node scripts/smoke.mjs",
     "webhook:serve": "node bin/gitlab-webhook.mjs",
+    "worker:serve": "node bin/review-worker.mjs",
     "smoke:review": "node scripts/review-smoke.mjs"
   },
   "engines": {
