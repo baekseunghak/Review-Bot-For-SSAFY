@@ -147,6 +147,24 @@ test("실행하지 않은 테스트 성공·추측한 결정 이유·비밀값�
   assert.deepEqual(normalizeReviewResult(reported), reported);
 });
 
+test("명세 근거는 현재 리뷰에 전달된 파일·시트·셀만 인용한다", () => {
+  const specification = { source: { name: "requirements.xlsx" },
+    sheets: [{ name: "Contract", rows: [{ row: 20, cells: [{ address: "D20", value: "Reject empty input." }] }] }] };
+  const result = review();
+  result.memory.implementation[0].evidence.push({ kind: "specification", ref: "requirements.xlsx#Contract!D20" });
+  assert.deepEqual(normalizeReviewResult(result, { context: { ...context, projectSpecification: specification } }), result);
+  assert.throws(() => normalizeReviewResult(result, { context }), UserError);
+  result.memory.implementation[0].evidence[1].ref = "requirements.xlsx#Contract!D21";
+  assert.throws(() => normalizeReviewResult(result, { context: { ...context, projectSpecification: specification } }), UserError);
+  const hold = holdReview();
+  const changes = { files: [{ oldPath: "src/input.js", newPath: "src/input.js", baseContent: "\n".repeat(10), headContent: "\n".repeat(10) }] };
+  hold.body = hold.body.replace("[정확성]", "[정확성] `requirements.xlsx#Contract!D20`과 달리");
+  const prepared = { ...context, projectSpecification: specification };
+  assert.deepEqual(normalizeReviewResult(hold, { context: prepared, changes }), hold);
+  hold.body = hold.body.replace("`src/input.js:10`", "해당 화면");
+  assert.throws(() => normalizeReviewResult(hold, { context: prepared, changes }), UserError, "명세만으로는 실제 코드 위치를 대신할 수 없다.");
+});
+
 test("확인된 보류 지적은 실제 수집 파일과 해당 base/head 코드의 줄 범위 안을 인용한다", () => {
   const hold = holdReview();
   const tenLines = Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n") + "\n";

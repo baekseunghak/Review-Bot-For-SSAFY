@@ -1,8 +1,9 @@
 import { UserError } from "./core.js";
 
 const BASES = new Set(["observed", "reported", "unknown"]);
-const KINDS = new Set(["code", "mr_description", "mr_comment", "jira", "test"]);
+const KINDS = new Set(["code", "mr_description", "mr_comment", "jira", "test", "specification"]);
 const AUTHOR_SOURCES = new Set(["mr_description", "mr_comment", "jira"]);
+const DECISION_SOURCES = new Set([...AUTHOR_SOURCES, "specification"]);
 const MAX_MEMORY_BYTES = 64 * 1024;
 
 function valid(condition) {
@@ -48,7 +49,7 @@ function summary(entry) {
   return { summary: text(entry.summary), ...basisAndEvidence(entry) };
 }
 
-export function normalizeReviewMemory(memory) {
+export function normalizeReviewMemory(memory, { specification } = {}) {
   object(memory, ["implementation", "decisions", "validations", "remainingWork"]);
   const normalized = {
     implementation: entries(memory, "implementation", summary, 1),
@@ -56,7 +57,7 @@ export function normalizeReviewMemory(memory) {
       object(entry, ["decision", "reason", "basis", "evidence"]);
       const evidence = basisAndEvidence(entry);
       valid(entry.reason === null || (typeof entry.reason === "string" && evidence.basis === "reported"
-        && evidence.evidence.some((source) => AUTHOR_SOURCES.has(source.kind))));
+        && evidence.evidence.some((source) => DECISION_SOURCES.has(source.kind))));
       return { decision: text(entry.decision), reason: entry.reason === null ? null : text(entry.reason), ...evidence };
     }),
     validations: entries(memory, "validations", (entry) => {
@@ -72,6 +73,15 @@ export function normalizeReviewMemory(memory) {
     remainingWork: entries(memory, "remainingWork", summary),
   };
   valid(Buffer.byteLength(JSON.stringify(normalized), "utf8") <= MAX_MEMORY_BYTES);
+  if (specification !== undefined) {
+    const references = new Set((specification?.sheets ?? []).flatMap((sheet) => sheet.rows.flatMap((row) =>
+      row.cells.map((cell) => `${specification.source.name}#${sheet.name}!${cell.address}`))));
+    for (const entries of Object.values(normalized)) {
+      for (const entry of entries) {
+        for (const source of entry.evidence) valid(source.kind !== "specification" || references.has(source.ref));
+      }
+    }
+  }
   return normalized;
 }
 

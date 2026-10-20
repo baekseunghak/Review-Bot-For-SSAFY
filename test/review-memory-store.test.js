@@ -93,6 +93,25 @@ test("memory requires bounded structured fields and rejects ungrounded claims an
   for (const record of cases) assert.throws(() => normalizeReviewMemory(record), UserError);
 });
 
+test("specification evidence names supplied cells and cannot prove an executed validation", () => {
+  const ref = "requirements.xlsx#Contract!D20";
+  const specification = { source: { name: "requirements.xlsx" },
+    sheets: [{ name: "Contract", rows: [{ row: 20, cells: [{ address: "D20", value: "Count evidence entries." }] }] }] };
+  const record = memory({ decisions: [{ decision: "Count evidence entries independently.", reason: "The supplied specification defines that unit.",
+    basis: "reported", evidence: [{ kind: "specification", ref }] }] });
+  assert.deepEqual(normalizeReviewMemory(record, { specification }), record);
+  assert.throws(() => normalizeReviewMemory(record, { specification: null }), UserError);
+  for (const missing of ["requirements.xlsx#Contract!D21", "other.xlsx#Contract!D20", "requirements.xlsx#Missing!D20"]) {
+    const invalid = structuredClone(record);
+    invalid.decisions[0].evidence[0].ref = missing;
+    assert.throws(() => normalizeReviewMemory(invalid, { specification }), UserError);
+  }
+  for (const basis of ["reported", "observed"]) {
+    assert.throws(() => normalizeReviewMemory(memory({ validations: [{ check: "Build execution", result: "passed", basis,
+      evidence: [{ kind: "specification", ref }] }] }), { specification }), UserError);
+  }
+});
+
 test("memory has a total UTF-8 budget even when every individual entry fits", () => {
   const make = (character) => memory({
     implementation: Array.from({ length: 30 }, () => ({ summary: character.repeat(1_000), basis: "unknown", evidence: [] })),

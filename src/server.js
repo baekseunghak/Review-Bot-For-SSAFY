@@ -31,7 +31,7 @@ const refresh = { readOnlyHint: false, destructiveHint: false, idempotentHint: t
 const jiraKeys = z.array(z.string().regex(/^[A-Z][A-Z0-9_]*-[1-9]\d*$/).max(128)).max(20);
 const memoryText = z.string().trim().min(1).max(2000);
 const memoryEvidence = z.array(z.strictObject({
-  kind: z.enum(["code", "mr_description", "mr_comment", "jira", "test"]),
+  kind: z.enum(["code", "mr_description", "mr_comment", "jira", "test", "specification"]),
   ref: z.string().trim().min(1).max(2048),
 })).max(10);
 const memoryBasis = z.enum(["observed", "reported", "unknown"]);

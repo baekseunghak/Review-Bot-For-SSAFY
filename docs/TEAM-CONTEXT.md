@@ -23,6 +23,8 @@ MCP가 사람별 담당 영역과 Jira 작업을 비공개로 보관하고, 리�
 
 `review_focus`에는 일반적인 검토 중점과 함께 사용자가 확인한 프로젝트 규칙을 적을 수 있습니다. 예를 들어 집계의 분자·분모·단위, 빈 설정의 기본 동작, 분류 설명의 의미를 출처·확인 날짜·이번 변경의 적용 범위와 함께 기록합니다. 이 기록은 외부 문서 원문을 직접 읽었다는 증거가 아닙니다. 출처가 개정되면 프로필도 갱신하고, 긴 명세 전체를 이 필드에 복사하지 마세요.
 
+시트·셀 주소를 보존한 명세는 별도 비공개 `project-specification.json`으로 등록합니다. [등록 형식과 갱신 방법](PROJECT-SPECIFICATION.md)을 따르세요. 같은 GitLab 호스트·전체 프로젝트 경로에서 리뷰를 준비할 때 등록된 모든 셀이 `projectSpecification`으로 전달되고 맥락 버전에 반영됩니다. 명세의 담당 조직을 개인 계정으로 추측해 팀원을 등록하지 않으며, 사용자 확인 추가 규칙은 원문과 구분합니다.
+
 MCP 프로세스를 시작하기 전에 `.env.example`에 나열한 Jira 환경변수를 설정합니다. 예시 파일을 자동으로 읽지는 않습니다.
 
 - `REVIEWBOT_JIRA_BASE_URL`: Jira Cloud HTTPS 주소.
@@ -111,9 +113,10 @@ MCP 서버 안의 타이머가 1분마다 실행 시점을 확인합니다. 팀�
 ```
 
 - 네 배열은 모두 필수이며 `implementation`에는 1개 이상이 필요합니다. 각 배열은 최대 30개, 항목의 텍스트는 2,000자, 근거는 최대 10개, 근거 `ref`는 2,048자입니다. 정규화한 메모리 전체는 UTF-8 JSON 기준 64KiB를 넘을 수 없습니다.
-- `basis`는 직접 확인한 `observed`, 출처에 적힌 진술인 `reported`, 미확인인 `unknown`입니다. `observed`와 `reported`에는 근거가 필요합니다. `evidence.kind`는 `code`, `mr_description`, `mr_comment`, `jira`, `test` 중 하나입니다. 근거 위치는 검토한 SHA·댓글·테스트 실행을 식별할 수 있게 적습니다. 서버가 근거 내용 자체를 검증하는 것은 아닙니다.
-- 결정 이유가 확인되지 않으면 `reason: null`로 남깁니다. 이유를 적으려면 `reported`와 MR 설명·댓글 또는 Jira 진술의 출처가 필요합니다. 코드 모양만 보고 작성자의 의도를 만들지 않습니다.
-- 검증 `result`는 `passed`, `failed`, `not_run`, `unknown`입니다. 직접 확인한 성공/실패에는 `test` 근거가 필요하며 출처가 전한 결과는 직접 실행한 결과와 구분합니다.
+- `basis`는 직접 확인한 `observed`, 출처에 적힌 진술인 `reported`, 미확인인 `unknown`입니다. `observed`와 `reported`에는 근거가 필요합니다. `evidence.kind`는 `code`, `mr_description`, `mr_comment`, `jira`, `test`, `specification` 중 하나입니다. 근거 위치는 검토한 SHA·댓글·테스트 실행을 식별할 수 있게 적습니다. 서버가 근거 내용 자체를 검증하는 것은 아닙니다.
+- 명세 근거는 `{"kind":"specification","ref":"requirements-v1.xlsx#기능명세!D20"}`처럼 정확한 `source.name#시트명!셀주소`를 사용합니다. 준비된 `projectSpecification`에 실제 포함된 셀만 완료 기록에 인용할 수 있습니다. 원본 해시와 수집 시각은 준비한 맥락의 `source`에 보존됩니다.
+- 결정 이유가 확인되지 않으면 `reason: null`로 남깁니다. 이유를 적으려면 `reported`와 MR 설명·댓글·Jira 또는 전달된 명세 셀의 진술이 필요합니다. 명세에 적힌 요구와 작성자 개인의 의도를 구분하고, 코드 모양만 보고 의도를 만들지 않습니다.
+- 검증 `result`는 `passed`, `failed`, `not_run`, `unknown`입니다. 직접 확인한 성공/실패에는 `test` 근거가 필요하며 출처가 전한 결과는 직접 실행한 결과와 구분합니다. 명세 셀만으로 테스트·빌드·린트 실행 성공이나 실패를 기록할 수 없습니다.
 
 `review_context_complete`는 준비한 맥락 버전과 GitLab의 현재 SHA가 일치할 때만 저장합니다. 같은 내용을 다시 저장하면 기존 기록을 반환하고, 다른 SHA의 리뷰는 별도 기록으로 누적합니다. 연결 Jira키·작성자·변경 경로는 준비한 맥락에서 가져오며 완료 호출에서 임의 이슈를 추가하지 않습니다. Jira 연결이 없으면 MR·SHA와 변경 파일 기준으로 보관합니다. 저장은 Jira 상태 변경·댓글 게시·승인·머지를 실행하지 않으며 `stage: reviewed`는 로컬 리뷰 기록 완료를 뜻합니다.
 
@@ -125,6 +128,7 @@ MCP 서버 안의 타이머가 1분마다 실행 시점을 확인합니다. 팀�
 
 ```text
 비공개 데이터 디렉터리/
+  project-specification.json          # 선택 등록한 프로젝트 명세의 원본 셀·출처
   team-context.sqlite3
   people/<id>/profile.md
   people/<id>/weeks/<월요일>.md
