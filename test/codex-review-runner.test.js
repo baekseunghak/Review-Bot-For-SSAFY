@@ -129,47 +129,73 @@ test("도구 실행 이벤트와 미완료·실패·잘못된 JSONL은 결과가
     { events: [{ type: "item.completed", item: { type: "agent_message", text: "" } }, completed] },
     { events: [{ type: "result", structured_output: review() }] },
     { raw: "fixture-private-token" }, { raw: '{"type":"turn.completed"' },
-    { error: "fixture-private-token" }, { code: 1, stderr: "fixture-private-token" },
-    { hang: true, onInput: (call) => call.child.stdout.emit("error", new Error("fixture-private-token")) },
-    { hang: true, onInput: (call) => call.child.stderr.emit("error", new Error("fixture-private-token")) },
+    { error: "fixture-private-token", expectedCode: "runner_start_failed" },
+    { code: 1, stderr: "fixture-private-token", expectedCode: "runner_exit_failed" },
+    { hang: true, onInput: (call) => call.child.stdout.emit("error", new Error("fixture-private-token")), expectedCode: "runner_output_failed" },
+    { hang: true, onInput: (call) => call.child.stderr.emit("error", new Error("fixture-private-token")), expectedCode: "runner_output_failed" },
   ];
   for (const options of cases) {
     const fake = fakeRunner(options);
     await assert.rejects(new CodexReviewRunner({ spawnImpl: fake.spawnImpl }).review({ context }),
-      (error) => error instanceof UserError && !error.message.includes("fixture-private-token"));
+      (error) => error instanceof UserError && error.code === (options.expectedCode ?? "runner_response_invalid")
+        && !error.message.includes("fixture-private-token"));
     assert.equal(fake.calls.length, 1, "No fallback execution or provider switch is allowed.");
     assert.equal(existsSync(fake.calls[0].options.cwd), false);
   }
 });
 
 test("Codex 결과도 동일한 맥락·공개 본문·검증 사실 검사를 통과해야 한다", async () => {
-  for (const mutate of [
-    (value) => { value.body = value.body.replace("TEST-1과 `src/input.js:10`", "다른 작업"); },
-    (value) => { value.body += "\n/merge"; },
-    (value) => { value.memory.validations = [{ check: "테스트 실행", result: "passed", basis: "observed", evidence: [{ kind: "test", ref: "fixture" }] }]; },
+  for (const [mutate, code] of [
+    [(value) => { value.body = value.body.replace("TEST-1과 `src/input.js:10`", "다른 작업"); }, "review_context_invalid"],
+    [(value) => { value.body += "\n/merge"; }, "review_body_invalid"],
+    [(value) => { value.memory.validations = [{ check: "테스트 실행", result: "passed", basis: "observed", evidence: [{ kind: "test", ref: "fixture" }] }]; }, "review_test_claim_invalid"],
   ]) {
     const value = review(); mutate(value);
     const fake = fakeRunner({ events: [message(value), completed] });
-    await assert.rejects(new CodexReviewRunner({ spawnImpl: fake.spawnImpl }).review({ context }), /invalid review/);
+    await assert.rejects(new CodexReviewRunner({ spawnImpl: fake.spawnImpl }).review({ context }), { code });
   }
 });
 
 test("입력 크기·stdout·stderr·시간 제한과 취소를 적용하며 임시 스키마를 삭제한다", async () => {
   const unused = fakeRunner();
-  await assert.rejects(new CodexReviewRunner({ spawnImpl: unused.spawnImpl, maxInputBytes: 10 }).review({ value: "too much input" }), /input exceeds/);
+  await assert.rejects(new CodexReviewRunner({ spawnImpl: unused.spawnImpl, maxInputBytes: 10 }).review({ value: "too much input" }), { code: "input_too_large" });
   assert.equal(unused.calls.length, 0);
   const before = new AbortController(); before.abort();
-  await assert.rejects(new CodexReviewRunner({ spawnImpl: unused.spawnImpl }).review({}, { signal: before.signal }), /cancelled/);
+  await assert.rejects(new CodexReviewRunner({ spawnImpl: unused.spawnImpl }).review({}, { signal: before.signal }), { code: "runner_cancelled" });
   assert.equal(unused.calls.length, 0);
-  for (const options of [{ raw: "x".repeat(101) }, { stderr: "x".repeat(101) }, { hang: true }]) {
+  for (const [options, code] of [[{ raw: "x".repeat(101) }, "runner_output_limit"],
+    [{ stderr: "x".repeat(101) }, "runner_output_limit"], [{ hang: true }, "runner_timeout"]]) {
     const fake = fakeRunner(options);
-    await assert.rejects(new CodexReviewRunner({ spawnImpl: fake.spawnImpl, maxOutputBytes: 100, timeoutMs: 20 }).review({}), /limit|timed out/);
+    await assert.rejects(new CodexReviewRunner({ spawnImpl: fake.spawnImpl, maxOutputBytes: 100, timeoutMs: 20 }).review({}), { code });
     assert.equal(fake.calls[0].child.killed, "SIGKILL");
     assert.equal(existsSync(fake.calls[0].options.cwd), false);
   }
   const during = new AbortController();
   const fake = fakeRunner({ hang: true, onInput: () => during.abort() });
-  await assert.rejects(new CodexReviewRunner({ spawnImpl: fake.spawnImpl }).review({}, { signal: during.signal }), /cancelled/);
+  await assert.rejects(new CodexReviewRunner({ spawnImpl: fake.spawnImpl }).review({}, { signal: during.signal }), { code: "runner_cancelled" });
   assert.equal(fake.calls[0].child.killed, "SIGKILL");
   assert.equal(existsSync(fake.calls[0].options.cwd), false);
+});
+
+test("직렬화·프로세스 시작·stdin 실패도 원문 없이 고정 진단 코드만 보존한다", async () => {
+  const safeError = (code) => (error) => error instanceof UserError && error.code === code
+    && !error.message.includes("fixture-private-token");
+  const unused = fakeRunner();
+  const circular = {}; circular.self = circular;
+  await assert.rejects(new CodexReviewRunner({ spawnImpl: unused.spawnImpl }).review(circular), safeError("runner_input_failed"));
+  assert.equal(unused.calls.length, 0);
+  await assert.rejects(new CodexReviewRunner({ spawnImpl: () => { throw new Error("fixture-private-token"); } }).review({}),
+    safeError("runner_start_failed"));
+  const streamError = fakeRunner({ hang: true, onInput: (call) => call.child.stdin.emit("error", new Error("fixture-private-token")) });
+  await assert.rejects(new CodexReviewRunner({ spawnImpl: streamError.spawnImpl }).review({}), safeError("runner_input_failed"));
+  const thrownInput = fakeRunner();
+  await assert.rejects(new CodexReviewRunner({ spawnImpl: (...args) => {
+    const child = thrownInput.spawnImpl(...args);
+    child.stdin.end = () => { throw new Error("fixture-private-token"); };
+    return child;
+  } }).review({}), safeError("runner_input_failed"));
+  for (const fake of [streamError, thrownInput]) {
+    assert.equal(fake.calls[0].child.killed, "SIGKILL");
+    assert.equal(existsSync(fake.calls[0].options.cwd), false);
+  }
 });

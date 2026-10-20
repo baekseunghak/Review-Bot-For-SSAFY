@@ -339,6 +339,27 @@ test("lease가 만료돼 다른 worker가 인계하면 이전 모델 결과는 �
   assert.equal(f.contextService.reviewHistory().total, 1);
 });
 
+test("실행기 검증 오류는 구체적인 코드와 안전한 설명으로 조회되고 원문을 남기거나 게시하지 않는다", async (t) => {
+  const f = fixture(t);
+  f.send();
+  f.hooks.review = async () => { throw Object.assign(new Error("fixture-private-output"), { code: "review_locations_invalid" }); };
+  assert.deepEqual(await f.makeWorker().runOnce(), { status: "failed", requestId: 1, code: "review_locations_invalid" });
+  let status = f.inbox.workerStatus();
+  assert.equal(status.jobs[0].lastErrorCode, "review_locations_invalid");
+  assert.match(status.jobs[0].lastErrorMessage, /파일·줄 위치/);
+  assert.equal(JSON.stringify(status).includes("fixture-private-output"), false);
+  assert.equal(f.notes.length, 0);
+  assert.equal(f.calls.notifications.length, 0);
+  assert.equal(f.contextService.reviewHistory().total, 0);
+  f.advance();
+  f.hooks.review = async () => { throw new Error("fixture-private-output"); };
+  await f.makeWorker().runOnce();
+  status = f.inbox.workerStatus();
+  assert.equal(status.jobs[0].lastErrorCode, "review_step_failed");
+  assert.match(status.jobs[0].lastErrorMessage, /원인을 확정할 수 없/);
+  assert.equal(JSON.stringify(status).includes("fixture-private-output"), false);
+});
+
 test("모델 실행 중 stop은 AbortSignal을 전달하고 후속 게시 없이 lease를 재시도 상태로 해제한다", async (t) => {
   const f = fixture(t);
   f.send();

@@ -45,7 +45,7 @@ function completedReview(output) {
     if (!completed) throw new Error();
     return JSON.parse(response);
   } catch {
-    throw new UserError("The review runner did not return a completed review. No review was published.");
+    throw Object.assign(new UserError("The review runner did not return a completed review. No review was published."), { code: "runner_response_invalid" });
   }
 }
 
@@ -67,7 +67,7 @@ export class CodexReviewRunner {
     return withReviewWorkspace(async (directory) => {
       const schemaFile = join(directory, "review-result.schema.json");
       try { await writeFile(schemaFile, JSON.stringify(REVIEW_RESULT_SCHEMA), { flag: "wx", mode: 0o600 }); }
-      catch { throw new UserError("The review runner could not prepare its output schema."); }
+      catch { throw Object.assign(new UserError("The review runner could not prepare its output schema."), { code: "runner_start_failed" }); }
       const args = ["exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check",
         "--sandbox", "read-only", "--json", "--output-schema", schemaFile,
         "-c", `developer_instructions=${JSON.stringify(REVIEW_SYSTEM_PROMPT)}`,

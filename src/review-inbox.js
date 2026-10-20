@@ -7,6 +7,27 @@ import { resolveDataDir, UserError } from "./core.js";
 const ACTIONS = new Set(["open", "update", "close", "reopen", "merge", "approval", "approved", "unapproval", "unapproved"]);
 const STATES = new Set(["opened", "closed", "merged", "locked"]);
 const USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$/;
+const ERROR_MESSAGES = new Map(Object.entries({
+  notification_unknown: "Mattermost 알림의 도착 여부가 불명확합니다. 확인 없이 자동으로 다시 보내지 않습니다.",
+  review_step_failed: "상세 원인이 기록되지 않은 오류입니다. 이 코드만으로 원인을 확정할 수 없습니다.",
+  runner_configuration_invalid: "리뷰 실행기 설정값이 허용된 형식이나 범위를 벗어났습니다.",
+  input_too_large: "검토 자료가 실행기의 입력 크기 제한을 초과했습니다.",
+  runner_cancelled: "리뷰 실행이 취소되었습니다.",
+  runner_start_failed: "리뷰 실행기를 시작하거나 임시 작업 공간을 준비하지 못했습니다.",
+  runner_input_failed: "리뷰 자료를 실행기에 전달하지 못했습니다.",
+  runner_output_failed: "리뷰 실행기의 출력 스트림을 읽지 못했습니다.",
+  runner_output_limit: "리뷰 실행기의 출력이 허용된 크기를 초과했습니다.",
+  runner_timeout: "리뷰 실행이 설정된 시간 제한을 초과했습니다.",
+  runner_exit_failed: "리뷰 CLI가 비정상 종료했습니다. 인증·지원 인수·사용 한도 등의 추가 확인이 필요합니다.",
+  runner_response_invalid: "완료된 구조화 응답을 확인하지 못했습니다. 이벤트 형식·완료 여부·JSON 해석 검사가 실패했습니다.",
+  review_result_invalid: "리뷰 결과의 최상위 JSON 구조가 요구 형식과 다릅니다.",
+  review_body_invalid: "리뷰 본문이 공개 가능한 내용과 길이 규칙을 충족하지 못했습니다.",
+  review_sections_invalid: "리뷰 본문의 필수 섹션·판정·지적 분류가 요구 형식과 다릅니다.",
+  review_context_invalid: "리뷰 본문에서 준비된 작업 맥락의 근거를 확인하지 못했습니다.",
+  review_locations_invalid: "확정한 지적의 파일·줄 위치가 제공된 실제 코드와 맞지 않습니다.",
+  review_memory_invalid: "누적 리뷰 기록의 형식이나 출처 근거가 요구 조건과 다릅니다.",
+  review_test_claim_invalid: "직접 실행하지 않은 검증의 성공·실패를 직접 확인한 결과로 기록했습니다.",
+}));
 
 function invalid() {
   throw new UserError("Invalid review webhook data.");
@@ -458,7 +479,9 @@ export class ReviewInbox {
     const jobs = this.db.prepare(`SELECT request_id, stage, status, attempts, error_code, next_attempt_at
       FROM review_executions ORDER BY updated_at DESC, request_id DESC LIMIT ?`).all(limit).map((row) => ({
       requestId: Number(row.request_id), stage: row.stage, status: row.status,
-      attempt: Number(row.attempts), lastErrorCode: row.error_code, nextAttemptAt: row.next_attempt_at,
+      attempt: Number(row.attempts), lastErrorCode: row.error_code,
+      lastErrorMessage: row.error_code ? ERROR_MESSAGES.get(row.error_code) ?? "추가 진단이 필요한 처리 오류입니다. 오류 코드와 단계를 확인하세요." : null,
+      nextAttemptAt: row.next_attempt_at,
     }));
     return { counts, jobs };
   }

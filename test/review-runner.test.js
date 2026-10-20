@@ -153,7 +153,7 @@ test("명세 근거는 현재 리뷰에 전달된 파일·시트·셀만 인용�
   const result = review();
   result.memory.implementation[0].evidence.push({ kind: "specification", ref: "requirements.xlsx#Contract!D20" });
   assert.deepEqual(normalizeReviewResult(result, { context: { ...context, projectSpecification: specification } }), result);
-  assert.throws(() => normalizeReviewResult(result, { context }), UserError);
+  assert.throws(() => normalizeReviewResult(result, { context }), { code: "review_memory_invalid" });
   result.memory.implementation[0].evidence[1].ref = "requirements.xlsx#Contract!D21";
   assert.throws(() => normalizeReviewResult(result, { context: { ...context, projectSpecification: specification } }), UserError);
   const hold = holdReview();
@@ -165,6 +165,26 @@ test("명세 근거는 현재 리뷰에 전달된 파일·시트·셀만 인용�
   assert.throws(() => normalizeReviewResult(hold, { context: prepared, changes }), UserError, "명세만으로는 실제 코드 위치를 대신할 수 없다.");
 });
 
+test("리뷰 거부 이유는 구조·본문·섹션·맥락·위치·메모리·실행 주장별로 구분한다", () => {
+  const changes = { files: [{ oldPath: "src/input.js", newPath: "src/input.js", baseContent: "\n".repeat(10), headContent: "\n".repeat(10) }] };
+  const cases = [
+    [review(), (value) => { value.extra = "fixture-private-token"; }, "review_result_invalid"],
+    [review(), (value) => { value.body += "\n/merge fixture-private-token"; }, "review_body_invalid"],
+    [review(), (value) => { value.body = value.body.replace("### 확인한 범위", "### 기타"); }, "review_sections_invalid"],
+    [review(), (value) => { value.body = value.body.replace("TEST-1 입력 검증 요구와 `src/input.js:10`", "fixture-private-token"); }, "review_context_invalid"],
+    [holdReview(), (value) => { value.body = value.body.replace("src/input.js:10", "src/missing.js:10"); }, "review_locations_invalid"],
+    [review(), (value) => { value.memory.implementation[0].evidence = []; }, "review_memory_invalid"],
+    ...["passed", "failed"].map((result) => [review(), (value) => {
+      value.memory.validations = [{ check: "fixture-private-token", result, basis: "observed", evidence: [{ kind: "test", ref: "fixture" }] }];
+    }, "review_test_claim_invalid"]),
+  ];
+  for (const [value, mutate, code] of cases) {
+    mutate(value);
+    assert.throws(() => normalizeReviewResult(value, { context, changes }), (error) => error instanceof UserError
+      && error.code === code && error.message === "The review runner returned an invalid review. No review was published.");
+  }
+});
+
 test("확인된 보류 지적은 실제 수집 파일과 해당 base/head 코드의 줄 범위 안을 인용한다", () => {
   const hold = holdReview();
   const tenLines = Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n") + "\n";
@@ -173,7 +193,7 @@ test("확인된 보류 지적은 실제 수집 파일과 해당 base/head 코드
   for (const replacement of ["src/missing.js:10", "src/input.js:11", "src/input.js:0", "src/input.js:99999999999999999999"]) {
     const invalid = structuredClone(hold);
     invalid.body = invalid.body.replace("src/input.js:10", replacement);
-    assert.throws(() => normalizeReviewResult(invalid, { context, changes }), UserError);
+    assert.throws(() => normalizeReviewResult(invalid, { context, changes }), { code: "review_locations_invalid" });
   }
   const extra = structuredClone(hold);
   extra.body = extra.body.replace("### 확인한 범위", "- [데이터] 코드 위치 없이 추가한 확인된 지적\n\n### 확인한 범위");
@@ -187,17 +207,19 @@ test("확인된 보류 지적은 실제 수집 파일과 해당 base/head 코드
 
 test("오류 출력·미완료 결과·JSON 파싱 오류의 원문을 외부로 노출하지 않는다", async () => {
   for (const options of [
-    { error: "fixture-private-token" }, { code: 1, stderr: "fixture-private-token" },
-    { hang: true, onInput: (call) => call.child.stdout.emit("error", new Error("fixture-private-token")) },
-    { hang: true, onInput: (call) => call.child.stderr.emit("error", new Error("fixture-private-token")) },
+    { error: "fixture-private-token", expectedCode: "runner_start_failed" },
+    { code: 1, stderr: "fixture-private-token", expectedCode: "runner_exit_failed" },
+    { hang: true, onInput: (call) => call.child.stdout.emit("error", new Error("fixture-private-token")), expectedCode: "runner_output_failed" },
+    { hang: true, onInput: (call) => call.child.stderr.emit("error", new Error("fixture-private-token")), expectedCode: "runner_output_failed" },
     { raw: "fixture-private-token" },
     { raw: JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "fixture-private-token" }) },
-    { raw: JSON.stringify({ type: "result", subtype: "success", structured_output: { ...review(), body: "fixture-private-token" } }) },
+    { raw: JSON.stringify({ type: "result", subtype: "success", structured_output: { ...review(), body: "fixture-private-token" } }), expectedCode: "review_sections_invalid" },
     { raw: JSON.stringify({ type: "result", subtype: "success", result: JSON.stringify(review()) }) },
   ]) {
     const fake = fakeRunner(options);
     await assert.rejects(new ClaudeReviewRunner({ spawnImpl: fake.spawnImpl }).review({ context }),
-      (error) => error instanceof UserError && !error.message.includes("fixture-private-token"));
+      (error) => error instanceof UserError && error.code === (options.expectedCode ?? "runner_response_invalid")
+        && !error.message.includes("fixture-private-token"));
     assert.equal(fake.calls.length, 1, "No fallback invocation is allowed.");
     assert.equal(existsSync(fake.calls[0].options.cwd), false);
   }

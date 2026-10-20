@@ -159,7 +159,8 @@ test("manual retry of uncertain notification requires explicit duplicate-deliver
   assert.throws(() => instance.retryFailed(job.id, { now: LATER }), UserError);
   assert.deepEqual(instance.workerStatus(), {
     counts: { running: 0, retry: 0, completed: 0, failed: 1 },
-    jobs: [{ requestId: job.id, stage: "notification_unknown", status: "failed", attempt: 1, lastErrorCode: "delivery_unknown", nextAttemptAt: null }],
+    jobs: [{ requestId: job.id, stage: "notification_unknown", status: "failed", attempt: 1, lastErrorCode: "delivery_unknown",
+      lastErrorMessage: "추가 진단이 필요한 처리 오류입니다. 오류 코드와 단계를 확인하세요.", nextAttemptAt: null }],
   });
   assert.deepEqual(instance.retryFailed(job.id, { allowNotificationDuplicate: true, now: LATER }), {
     requestId: job.id, status: "retry", stage: "posted", nextAttemptAt: LATER,

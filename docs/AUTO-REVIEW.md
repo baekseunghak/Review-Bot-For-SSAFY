@@ -203,7 +203,21 @@ MCP `review_worker_status`:
 {"limit":20}
 ```
 
-설정·실행 상태와 최근 작업의 `requestId`, `stage`, `status`, `attempt`, `lastErrorCode`, `nextAttemptAt`를 확인합니다. 상태 목록에는 리뷰 본문·Jira 원문·인증값이 포함되지 않습니다. `running`은 선점 중, `retry`는 백오프 대기, `completed`는 종료, `failed`는 자동 재시도를 멈춘 상태입니다.
+설정·실행 상태와 최근 작업의 `requestId`, `stage`, `status`, `attempt`, `lastErrorCode`, `lastErrorMessage`, `nextAttemptAt`를 확인합니다. `lastErrorMessage`는 고정된 안전한 설명이며 CLI 출력·리뷰 본문·Jira 원문·인증값을 복사하지 않습니다. `running`은 선점 중, `retry`는 백오프 대기, `completed`는 종료, `failed`는 자동 재시도를 멈춘 상태입니다. `running`에 남은 오류 코드는 이전 시도의 실패일 수 있으므로 현재 단계·시도 번호도 확인합니다.
+
+| 오류 코드 | 확인된 실패 구간 |
+|---|---|
+| `input_too_large`, `runner_configuration_invalid` | 입력 크기 또는 실행기 설정 검증 |
+| `runner_start_failed`, `runner_input_failed`, `runner_output_failed` | 시작·입력 전달·출력 스트림 처리 |
+| `runner_output_limit`, `runner_timeout`, `runner_cancelled` | 출력 크기·실행 시간 제한 또는 취소 |
+| `runner_exit_failed` | CLI 비정상 종료. 인증·한도·지원 인수 중 어느 것인지는 이 코드만으로 확정하지 않음 |
+| `runner_response_invalid` | 완료 이벤트·허용된 이벤트 형식·JSON 해석 검사 |
+| `review_result_invalid`, `review_body_invalid`, `review_sections_invalid` | 리뷰 JSON 구조·공개 본문·필수 섹션 및 판정 형식 |
+| `review_context_invalid`, `review_locations_invalid` | 작업 맥락 인용 또는 실제 코드 파일·줄 근거 |
+| `review_memory_invalid`, `review_test_claim_invalid` | 누적 기록의 출처·형식 또는 실행하지 않은 검증의 직접 확인 주장 |
+| `review_step_failed` | 상세 구분이 없는 처리 오류. 이 코드만으로 과거의 실제 원인을 추정하지 않음 |
+
+실패를 보고할 때 요청·MR·단계와 함께 확인된 오류 설명, 재시도 상태, 댓글·알림 전송 여부를 구분합니다. 오래된 공통 오류 코드에 새 분류를 소급 적용해 원인을 확인한 것으로 쓰지 않습니다.
 
 설정·인증·매핑 문제를 고친 후 `review_job_retry`로 최종 실패 작업을 다시 대기시킵니다.
 

@@ -92,26 +92,34 @@ function validHoldLocations(body, files) {
 }
 
 export function normalizeReviewResult(value, { context, changes } = {}) {
+  let code = "review_result_invalid";
   try {
     if (!value || typeof value !== "object" || Array.isArray(value)
       || Object.keys(value).some((key) => !["verdict", "body", "memory"].includes(key))
       || !["approve", "hold"].includes(value.verdict) || typeof value.body !== "string") throw new Error();
     const body = value.body.trim();
+    code = "review_body_invalid";
     if (!body || body.length > MAX_BODY_CHARACTERS || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(body)
       || /^\s*\/[A-Za-z][A-Za-z_-]*(?:\s|$)/m.test(body)
-      || /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:glpat-|github_pat_|ghp_|xox[baprs]-|sk-ant-)[A-Za-z0-9_-]{10,}|@(all|channel|here)\b)/i.test(body)
-      || missingSections(value.verdict, body).length || verdictProblems(value.verdict, body).length
-      || !/^### 작업 맥락\s*\r?\n\s*\S/m.test(body)
+      || /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:glpat-|github_pat_|ghp_|xox[baprs]-|sk-ant-)[A-Za-z0-9_-]{10,}|@(all|channel|here)\b)/i.test(body)) throw new Error();
+    code = "review_sections_invalid";
+    if (missingSections(value.verdict, body).length || verdictProblems(value.verdict, body).length
       || (value.verdict === "hold" && (!usedHoldCategories(body).length || !citedLocations(body).length))) throw new Error();
+    code = "review_context_invalid";
+    if (!/^### 작업 맥락\s*\r?\n\s*\S/m.test(body)) throw new Error();
     if (context && reviewContextProblems({ contextRequired: true, context, headSha: context.headSha,
       contextVersion: context.contextVersion }, body).length) throw new Error();
+    code = "review_locations_invalid";
     if (value.verdict === "hold" && changes?.files !== undefined
       && (!Array.isArray(changes.files) || !validHoldLocations(body, changes.files))) throw new Error();
+    code = "review_test_claim_invalid";
+    if (Array.isArray(value.memory?.validations) && value.memory.validations.some((entry) =>
+      entry?.basis === "observed" && ["passed", "failed"].includes(entry.result))) throw new Error();
+    code = "review_memory_invalid";
     const memory = normalizeReviewMemory(value.memory, context ? { specification: context.projectSpecification ?? null } : {});
-    if (memory.validations.some((entry) => entry.basis === "observed" && ["passed", "failed"].includes(entry.result))) throw new Error();
     return { verdict: value.verdict, body, memory };
   } catch {
-    throw new UserError("The review runner returned an invalid review. No review was published.");
+    throw Object.assign(new UserError("The review runner returned an invalid review. No review was published."), { code });
   }
 }
 
@@ -147,9 +155,9 @@ export class ClaudeReviewRunner {
       const output = await runReviewProcess({ command: this.command, args, directory, env: this.env,
         input: serialized, spawnImpl: this.spawn, timeoutMs: this.timeoutMs, maxOutputBytes: this.maxOutputBytes, signal });
       let envelope;
-      try { envelope = JSON.parse(output); } catch { throw new UserError("The review runner returned invalid JSON."); }
+      try { envelope = JSON.parse(output); } catch { throw Object.assign(new UserError("The review runner returned invalid JSON."), { code: "runner_response_invalid" }); }
       if (!envelope || envelope.type !== "result" || envelope.subtype !== "success" || envelope.is_error
-        || !envelope.structured_output) throw new UserError("The review runner did not return a completed review.");
+        || !envelope.structured_output) throw Object.assign(new UserError("The review runner did not return a completed review."), { code: "runner_response_invalid" });
       return normalizeReviewResult(envelope.structured_output, { context: input?.context, changes: input?.changes });
     });
   }
