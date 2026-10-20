@@ -290,7 +290,8 @@ test("prepare는 실제 워크트리와 최신 팀 맥락을 연결하고 갱신
         return JSON.stringify(metadata);
       },
       contextService: { prepareReview: async (input) => {
-        assert.deepEqual(input.issueKeys, ["TEAM-12", "TEAM-13"]);
+        assert.deepEqual(input.issueKeys, ["TEAM-13", "TEAM-12"]);
+        assert.deepEqual(input.inferredIssueKeys, ["TEAM-12"]);
         assert.deepEqual(input.changedPaths, ["auth.js"]);
         assert.deepEqual(input.author, { username: "dev.one", id: 1 });
         return { ...state.context, mrUrl: input.mrUrl, headSha: input.headSha };

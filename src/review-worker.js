@@ -69,7 +69,7 @@ export class ReviewWorker {
           // Validate notification setup before spending a review run or publishing anything.
           this.notifier.prepare({ ...changes, issueKeys: changes.issueKeys, verdict: "approve", commentUrl: changes.mrUrl });
           bundle = await this.contextService.prepareReview({ mrUrl: changes.mrUrl, headSha: changes.headSha,
-            author: changes.author, changedPaths: changes.changedPaths, issueKeys: changes.issueKeys,
+            author: changes.author, changedPaths: changes.changedPaths, inferredIssueKeys: changes.issueKeys,
             mrSource: { title: changes.title.slice(0, 512), description: changes.description.slice(0, 16_000), descriptionTruncated: changes.description.length > 16_000 } });
           current();
           this.#assertHead(await this.gitlab.readHead(job), job.headSha);

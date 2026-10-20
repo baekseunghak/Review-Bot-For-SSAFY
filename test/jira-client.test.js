@@ -90,6 +90,31 @@ test("missing project key never selects an implicit project or makes network req
   assert.throws(() => client(mock, { projectKey: "invalid-project" }), UserError);
 });
 
+test("issue key matching uses the configured project and positive issue numbers without contacting Jira", () => {
+  const mock = fake();
+  const jira = client(mock);
+  for (const key of ["TEST-1", "TEST-30", "TEST-999999999999999"]) assert.equal(jira.acceptsIssueKey(key), true, key);
+  for (const key of ["SHA-256", "OTHER-30", "test-30", "TEST-0", "TEST-01", "TEST-1000000000000000", "TEST--1", "TEST-1.5", "TEST-1suffix", " TEST-1", "TEST-1 ", null, undefined, 30, {}]) {
+    assert.equal(jira.acceptsIssueKey(key), false, String(key));
+  }
+  assert.equal(new JiraClient({ fetchImpl: mock.fetchImpl }).acceptsIssueKey("TEST-1"), false);
+  const other = client(mock, { projectKey: "NEXT_2" });
+  assert.equal(other.acceptsIssueKey("NEXT_2-90"), true);
+  assert.equal(other.acceptsIssueKey("TEST-90"), false);
+  assert.equal(mock.calls.length, 0);
+});
+
+test("issue key matching does not weaken strict issue fetch validation", async () => {
+  const mock = fake();
+  const jira = client(mock);
+  for (const key of ["SHA-256", "OTHER-30", "TEST-0", "TEST-01", "TEST-1000000000000000"]) {
+    await assert.rejects(jira.getIssue(key), /configured Jira project/);
+    await assert.rejects(jira.getIssues(["TEST-1", key]), /configured Jira project/);
+  }
+  assert.equal(mock.calls.length, 0);
+  assert.equal((await jira.getIssue("TEST-999999999999999")).key, "TEST-999999999999999");
+});
+
 test("connection settings enforce HTTPS, credential-free URLs and explicit loopback HTTP only", async () => {
   for (const baseUrl of ["http://jira.example.test", "http://127.0.0.1", "ftp://jira.example.test", "https://user:password@jira.example.test", "https://jira.example.test?secret=1", "https://jira.example.test/#secret"]) {
     assert.throws(() => client(fake(), { baseUrl }), UserError);

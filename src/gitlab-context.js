@@ -109,7 +109,8 @@ export async function prepareMrContext({ mrUrl, contextService, runImpl = run, i
   if (typeof contextService?.prepareReview !== "function") throw new Error("팀 작업 맥락 서비스가 필요합니다.");
   const input = await readMrContext(mrUrl, { runImpl });
   if (!Array.isArray(issueKeys)) throw new Error("Jira 연결 키 목록이 올바르지 않습니다.");
-  input.issueKeys = [...new Set([...input.issueKeys, ...issueKeys])];
+  input.inferredIssueKeys = input.issueKeys;
+  input.issueKeys = [...new Set(issueKeys)];
   const bundle = await contextService.prepareReview(input);
   if (bundle?.status !== "fresh" || bundle.headSha !== input.headSha || bundle.mrUrl !== input.mrUrl) {
     throw new Error("최신 작업 맥락을 준비하지 못했습니다. 리뷰를 시작할 수 없습니다.");

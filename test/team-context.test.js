@@ -196,6 +196,23 @@ test("missing issue keys disclose requirement uncertainty and failed linked refr
   await assert.rejects(service.prepareReview({ ...input, author: { id: 999, username: "fixture-1" } }), /not mapped/);
 });
 
+test("자동 추출 후보는 Jira 프로젝트로 한정하고 명시한 연결 키의 조회 오류는 유지한다", async (t) => {
+  const { service, jira, linked, issueCalls } = fixture(t, { count: 1 });
+  jira.acceptsIssueKey = (key) => /^DEMO-[1-9]\d{0,14}$/.test(key);
+  linked.set("DEMO-7", issue("DEMO-7"));
+  const input = { mrUrl: "https://gitlab.example.test/team/repo/-/merge_requests/1", author: { id: 1 }, headSha: SHA };
+  const result = await service.prepareReview({ ...input, inferredIssueKeys: ["DEMO-7", "SHA-256", "OTHER-12", "DEMO-7"], issueKeys: ["DEMO-7"] });
+  assert.deepEqual(result.relatedIssues.map((item) => item.key), ["DEMO-7"]);
+  assert.deepEqual(issueCalls, ["DEMO-7"]);
+  assert.match(result.warnings.join(" "), /2개.*제외/);
+  const withoutMatch = await service.prepareReview({ ...input, inferredIssueKeys: ["SHA-256"] });
+  assert.equal(withoutMatch.relatedIssues.length, 0);
+  assert.match(withoutMatch.warnings.join(" "), /완료 조건/);
+  assert.deepEqual(issueCalls, ["DEMO-7"]);
+  await assert.rejects(service.prepareReview({ ...input, issueKeys: ["SHA-256"] }), /linked Jira issue/);
+  assert.deepEqual(issueCalls, ["DEMO-7", "SHA-256"]);
+});
+
 test("invalid repository paths including Windows absolute paths are rejected before Jira access", async (t) => {
   const { service, calls } = fixture(t);
   const input = { mrUrl: "https://gitlab.example.test/team/repo/-/merge_requests/1", author: { id: 1 }, headSha: SHA };

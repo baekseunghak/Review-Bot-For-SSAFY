@@ -130,9 +130,14 @@ export class JiraClient {
 
   get configured() { return this.#configured; }
 
+  acceptsIssueKey(key) {
+    return Boolean(this.#projectKey) && typeof key === "string"
+      && new RegExp(`^${this.#projectKey}-[1-9]\\d{0,14}$`).test(key);
+  }
+
   #issueKey(key) {
     if (!this.#projectKey) throw new UserError("Jira connection is not configured.");
-    if (typeof key !== "string" || !new RegExp(`^${this.#projectKey}-[1-9]\\d{0,14}$`).test(key)) throw new UserError("Issue key must belong to the configured Jira project.");
+    if (!this.acceptsIssueKey(key)) throw new UserError("Issue key must belong to the configured Jira project.");
     return key;
   }
 

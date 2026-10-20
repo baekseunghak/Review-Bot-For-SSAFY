@@ -175,9 +175,9 @@ export class TeamContextService {
     return { status: members.every((item) => item.status === "fresh") ? "fresh" : "partial", members };
   }
 
-  async prepareReview({ mrUrl, author, issueKeys = [], changedPaths = [], headSha, mrSource = null }) {
+  async prepareReview({ mrUrl, author, issueKeys = [], inferredIssueKeys = [], changedPaths = [], headSha, mrSource = null }) {
     const members = this.requireTeam();
-    if (!Array.isArray(issueKeys) || issueKeys.length > 20 || !Array.isArray(changedPaths)) throw new UserError("Provide at most twenty linked Jira issues and valid repository paths.");
+    if (!Array.isArray(issueKeys) || !Array.isArray(inferredIssueKeys) || !Array.isArray(changedPaths)) throw new UserError("Provide at most twenty linked Jira issues and valid repository paths.");
     if (!/^[a-f\d]{40}(?:[a-f\d]{24})?$/i.test(headSha ?? "")) throw new UserError("A current GitLab head SHA is required.");
     headSha = headSha.toLowerCase();
     if (mrSource !== null && (typeof mrSource.title !== "string" || mrSource.title.length > 512
@@ -188,7 +188,11 @@ export class TeamContextService {
     if (!["https:", "http:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new UserError("Invalid MR URL.");
     try { mrUrl = canonicalMrUrl(mrUrl); } catch { throw new UserError("A valid GitLab MR URL is required."); }
     if (changedPaths.some((path) => typeof path !== "string" || /[:\\\x00-\x1f]/.test(path) || path.split("/").some((part) => !part || part === "." || part === ".."))) throw new UserError("Invalid repository path.");
-    if (issueKeys.some((key) => !/^[A-Z][A-Z0-9_]*-[1-9]\d*$/.test(key))) throw new UserError("Invalid Jira issue key.");
+    if ([...issueKeys, ...inferredIssueKeys].some((key) => !/^[A-Z][A-Z0-9_]*-[1-9]\d*$/.test(key))) throw new UserError("Invalid Jira issue key.");
+    const candidates = [...new Set(inferredIssueKeys)];
+    const inferred = candidates.filter((key) => typeof this.jira.acceptsIssueKey !== "function" || this.jira.acceptsIssueKey(key));
+    issueKeys = [...new Set([...inferred, ...issueKeys])];
+    if (issueKeys.length > 20) throw new UserError("Provide at most twenty linked Jira issues and valid repository paths.");
     const member = author?.id != null
       ? members.find((item) => item.gitlabUserId === author.id) ?? members.find((item) => item.gitlabUserId == null && item.gitlabUsername.toLowerCase() === author?.username?.toLowerCase())
       : members.find((item) => item.gitlabUsername.toLowerCase() === author?.username?.toLowerCase());
@@ -215,6 +219,7 @@ export class TeamContextService {
         relevance, changedPaths: affectedPaths, workItems, totalIssueCount: issues.length, omittedIssueCount: Math.max(0, issues.length - limit) };
     }).sort((a, b) => ["author", "affected", "background"].indexOf(a.relevance) - ["author", "affected", "background"].indexOf(b.relevance));
     const warnings = [];
+    if (inferred.length < candidates.length) warnings.push(`자동 추출한 후보 중 설정된 Jira 프로젝트에 속하지 않는 ${candidates.length - inferred.length}개를 이슈 연결에서 제외했습니다.`);
     if (!relatedIssues.length) warnings.push("연결된 Jira키가 없어 완료 조건 충족 여부는 확인할 수 없습니다.");
     if ([...relatedIssues, ...perspectives.flatMap((view) => view.workItems)].some((issue) => issue.descriptionTruncated)) warnings.push("일부 Jira 설명이 길이 제한으로 생략되었습니다. 필요한 원문은 출처에서 확인하세요.");
     if ([...relatedIssues, ...perspectives.flatMap((view) => view.workItems)].some((issue) => issue.historyOmittedCount)) warnings.push("작업별 변경 이력은 최근 20개만 전달합니다. 전체 이력은 비공개 이슈 기록 또는 Jira 출처에서 확인하세요.");

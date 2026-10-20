@@ -90,6 +90,7 @@ function fixture(t) {
     components: ["API"], inCurrentSprint: true, history: [], historyComplete: true, descriptionTruncated: false });
   const jira = {
     configured: true,
+    acceptsIssueKey: (key) => /^TEAM-[1-9]\d{0,14}$/.test(key),
     async getMemberIssues(accountId) {
       calls.jira.push({ type: "member", accountId });
       return { issues: [jiraIssue()], complete: true, fetchedAt: now().toISOString() };
@@ -193,6 +194,17 @@ test("웹훅 요청은 실제 코드 검토·누적 기록·MR 댓글·Mattermos
   f.advance();
   f.send({}, "same-sha-new-delivery");
   assert.deepEqual(await f.makeWorker().runOnce(), { status: "idle" });
+});
+
+test("MR 설명의 SHA-256은 Jira 후보에서 제외하고 실제 이슈와 리뷰·게시·알림을 처리한다", async (t) => {
+  const f = fixture(t);
+  f.changeMr({ description: "SHA-256을 사용해 응답을 검증합니다. OTHER-12는 외부 참조입니다." });
+  f.send();
+  assert.equal((await f.makeWorker().runOnce()).status, "completed");
+  assert.deepEqual(f.calls.jira.filter((call) => call.type === "issue").map((call) => call.key), ["TEAM-7"]);
+  assert.deepEqual(f.calls.reviews[0].context.relatedIssues.map((item) => item.key), ["TEAM-7"]);
+  assert.match(f.calls.reviews[0].context.warnings.join(" "), /2개.*제외/);
+  assert.deepEqual(f.events, ["review", "comment", "notification"]);
 });
 
 test("다음 커밋 자동 리뷰는 이전 구현 기록을 다시 참고하며 새 기록을 누적한다", async (t) => {

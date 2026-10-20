@@ -66,7 +66,8 @@ test("추가 Jira 키는 MR 양식을 바꾸지 않고 연결하며 긴 설명�
     runImpl: runner({ mr: metadata({ description: "x".repeat(16_001) }) }),
     contextService: { prepareReview: async (input) => ({ ...input, status: "fresh" }) },
   });
-  assert.deepEqual(result.issueKeys, ["TEAM-12", "TEAM-14", "TEAM-99"]);
+  assert.deepEqual(result.issueKeys, ["TEAM-99", "TEAM-12"]);
+  assert.deepEqual(result.inferredIssueKeys, ["TEAM-12", "TEAM-14"]);
   assert.equal(result.mrSource.description.length, 16_000);
   assert.equal(result.mrSource.descriptionTruncated, true);
 });
