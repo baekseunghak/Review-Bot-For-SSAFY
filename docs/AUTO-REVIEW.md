@@ -10,7 +10,7 @@
   → worker claim + lease
   → glab: 실제 MR 주소·현재 SHA·전체 diff·변경 전후 파일·설명·댓글
   → Jira 최신화 + 등록 팀원 관점 + 관련 누적 리뷰 기록
-  → Claude Code CLI: 도구 없이 자료 검토
+  → 선택한 Codex CLI 또는 Claude Code CLI: 수집한 자료의 정적 검토
   → 판정·공개 댓글·비공개 memory 검증
   → 비공개 누적 기록 저장
   → 현재 열린 MR·비draft·SHA·lease 재확인
@@ -30,22 +30,44 @@
 | 항목 | 확인할 내용 |
 |---|---|
 | `glab` | worker를 실행할 OS 계정에서 대상 호스트에 로그인. MR·코드·댓글 읽기와 MR 댓글 작성 권한 |
-| Claude Code CLI | 같은 OS 계정에서 로그인. 기본 명령은 `claude`, Windows는 실제 `.exe` 실행 파일 권장 |
+| Codex CLI 또는 Claude Code CLI | 같은 OS 계정에서 선택한 CLI 로그인. provider별 기본 명령은 `codex`·`claude`, Windows는 실제 `.exe` 실행 파일 권장 |
 | Jira | 네 환경변수 설정, 팀원 1명 이상 등록, MR 작성자의 GitLab 계정을 프로필에 연결 |
 | Mattermost | Incoming Webhook, 활성 논리 채널, 작성자의 GitLab→Mattermost 참가자 매핑, `review-complete` 템플릿 |
 | 공개 HTTPS 경로 | GitLab 웹훅이 같은 데이터 디렉터리를 쓰는 로컬 수신기에 도착하는 경로 |
 
 자동 리뷰는 설치한 CLI의 기존 인증과 사용량을 사용합니다. 별도 모델 API 키를 이 서버에 등록할 필요는 없습니다. 모델 서비스에는 수집한 코드·MR 논의·Jira·누적 기록이 전달됩니다. CLI의 인증 방식과 데이터 처리 정책은 해당 실행 환경을 기준으로 적용됩니다.
 
-CLI는 임시 작업 폴더에서 `--safe-mode`, `--restricted`, 도구 비활성, 빈 MCP 구성, 세션 미보관 설정으로 실행합니다. 저장소 훅이나 검토 자료에 적힌 명령을 실행하는 흐름은 제공하지 않습니다. 조직에서 강제한 CLI 설정·hook은 설치자가 확인해야 합니다. 사용 중인 CLI가 필요한 옵션을 지원하지 않으면 작업을 실패 처리하며 다른 권한 모드로 자동 전환하지 않습니다. [CLI 옵션](https://code.claude.com/docs/en/cli-reference), [관리 hook 설정](https://code.claude.com/docs/en/hooks#disable-or-remove-hooks).
+자동 리뷰는 현재 열려 있는 대화를 재개하지 않고 매번 별도 비대화 CLI 실행으로 처리합니다. 같은 계정으로 로그인해도 현재 대화 전체가 자동으로 전달되지는 않습니다. 이전 맥락은 같은 비공개 데이터 디렉터리에 쌓인 Jira·MR 기록에서 다시 읽으며, provider를 바꿔도 기존 기록과 댓글·DM 복구 상태를 유지합니다.
+
+Codex를 사용하려면 worker를 실행할 OS 계정에서 다음을 실행합니다. 로그인 화면의 계정으로 인증하며 인증 파일·토큰을 채팅이나 저장소로 복사하지 않습니다. [공식 비대화 실행 안내](https://learn.chatgpt.com/docs/non-interactive-mode)와 [CLI 명령 안내](https://learn.chatgpt.com/docs/developer-commands?surface=cli)를 참고하세요.
 
 ```sh
 glab --version
-claude --version
+codex --version
+codex login
+codex login status
 glab auth status --hostname gitlab.example.com
 ```
 
-Windows에서 `claude`가 `.cmd` 또는 PowerShell 스크립트로만 잡히면 `REVIEWBOT_REVIEW_COMMAND`에 실제 실행 파일의 절대 경로를 지정합니다. 이 값에는 실행 파일 하나만 적으며 추가 인수나 셸 명령을 붙이지 않습니다.
+Codex 선택 설정은 다음과 같습니다. 기존 `.env`가 `REVIEWBOT_REVIEW_COMMAND=claude`로 되어 있으면 provider와 함께 명령도 비우거나 `codex`로 바꿉니다. 진행 중인 작업을 확인하고 기존 worker 프로세스를 종료한 뒤 설정을 변경하고 재시작합니다. MCP 서버 안의 worker도 같은 변경을 적용하려면 MCP 서버를 재시작해야 합니다. `.env`를 수정하는 것만으로 실행 중인 프로세스의 설정이 바뀌지는 않습니다.
+
+```dotenv
+REVIEWBOT_REVIEW_PROVIDER=codex
+REVIEWBOT_REVIEW_COMMAND=
+REVIEWBOT_REVIEW_MODEL=
+```
+
+`REVIEWBOT_REVIEW_MODEL`은 선택 인수입니다. 비우면 CLI가 기본 모델을 선택합니다. Codex 자동 실행은 사용자 설정을 무시하므로 사용자 `config.toml`의 모델 설정을 그대로 사용한다고 가정하지 않습니다. 특정 모델을 사용하려면 해당 계정에서 허용한 모델 ID를 적습니다. 이 설정은 MCP 대화의 모델 선택을 바꾸지 않습니다.
+
+Claude를 계속 쓰려면 `REVIEWBOT_REVIEW_PROVIDER=claude`를 선택하고 `claude --version`과 CLI 로그인을 확인합니다. provider를 미설정하거나 비우면 기존 설치와의 호환을 위해 `claude`를 사용합니다. 새 `.env.example`은 `codex`를 명시합니다.
+
+Windows에서 `codex`·`claude`가 `.cmd` 또는 PowerShell 스크립트로만 잡히면 `REVIEWBOT_REVIEW_COMMAND`에 실제 실행 파일의 절대 경로를 지정합니다. 이 값에는 실행 파일 하나만 적으며 추가 인수나 셸 명령을 붙이지 않습니다.
+
+두 provider 모두 비공개 임시 작업 폴더에서 실행하고 검토 자료는 stdin으로 전달합니다. Codex는 `exec --ignore-user-config --ignore-rules --ephemeral`, 읽기 전용 sandbox, 승인 요청 비활성, 구조화 출력을 사용합니다. 셸·웹 검색·앱·훅·플러그인·보조 에이전트·스킬 검색·Code Mode 등도 비활성화 설정을 전달합니다. 출력에 명령·도구 실행 이벤트가 있으면 결과를 게시하지 않고 실패 처리합니다. 이 설정이 CLI의 모든 내장 도구 제거를 보장하거나 읽기 전용 sandbox가 파일 읽기까지 막는다는 뜻은 아닙니다. 사용자 설정 무시는 시스템·조직의 관리 설정 전체 제거도 보장하지 않습니다. 검토 자료가 민감하거나 관리형 연결 기능이 있으면 전용 OS 계정·격리 환경의 접근 범위도 설정하세요.
+
+Codex 시작 과정의 Code Mode 호스트 비활성 안내는 CLI가 보내는 고정된 문구 1개만 검토 턴 시작 전에 한 번 허용합니다. 이 안내가 direct tools로의 전환을 알리더라도 개별 기능 비활성·읽기 전용 설정은 유지합니다. 그 외 경고·오류·유사 문구·도구 실행 이벤트는 검토 결과로 받아들이지 않습니다.
+
+Claude는 `--safe-mode`, `--restricted`, 도구 비활성, 빈 MCP 구성, 세션 미보관 설정으로 실행합니다. 저장소 훅이나 검토 자료에 적힌 명령을 실행하는 흐름은 제공하지 않습니다. 조직에서 강제한 CLI 설정·hook은 설치자가 확인해야 합니다. 필요한 옵션을 지원하지 않거나 허용되지 않은 실행 이벤트를 반환하면 작업을 실패 처리하며 다른 provider나 권한 모드로 자동 전환하지 않습니다. [Claude CLI 옵션](https://code.claude.com/docs/en/cli-reference), [관리 hook 설정](https://code.claude.com/docs/en/hooks#disable-or-remove-hooks).
 
 ## 3. Mattermost 매핑
 
@@ -92,7 +114,9 @@ REVIEWBOT_GITLAB_BOT_USER_ID=456
 
 REVIEWBOT_AUTO_REVIEW=1
 REVIEWBOT_MATTERMOST_CHANNEL=team-reviews
-REVIEWBOT_REVIEW_COMMAND=claude
+REVIEWBOT_REVIEW_PROVIDER=codex
+REVIEWBOT_REVIEW_COMMAND=
+REVIEWBOT_REVIEW_MODEL=
 REVIEWBOT_REVIEW_TIMEOUT_MS=180000
 REVIEWBOT_WORKER_INTERVAL_MS=5000
 ```
@@ -104,7 +128,9 @@ REVIEWBOT_WORKER_INTERVAL_MS=5000
 | `REVIEWBOT_GITLAB_PROJECT_IDS` | 자동 처리를 허용한 숫자 프로젝트 ID 목록 |
 | `REVIEWBOT_AUTO_REVIEW` | `1`이면 활성화. 미설정·빈 값·`0`이면 비활성, 다른 값은 설정 오류 |
 | `REVIEWBOT_MATTERMOST_CHANNEL` | 작성자 DM 웹훅을 찾는 기존 논리 채널 이름 |
-| `REVIEWBOT_REVIEW_COMMAND` | CLI 실행 파일, 기본 `claude` |
+| `REVIEWBOT_REVIEW_PROVIDER` | `codex`·`claude`만 허용. 새 설정 예시는 `codex`, 미설정·빈 값은 `claude` |
+| `REVIEWBOT_REVIEW_COMMAND` | CLI 실행 파일. 비우면 선택한 provider의 명령 이름 |
+| `REVIEWBOT_REVIEW_MODEL` | 선택한 CLI의 모델 ID. 비우면 CLI의 기본 모델 선택 |
 | `REVIEWBOT_REVIEW_TIMEOUT_MS` | 리뷰 CLI 제한 시간, 기본 180,000ms |
 | `REVIEWBOT_WORKER_INTERVAL_MS` | 로컬 대기열 확인 간격, 기본 5,000ms |
 
@@ -197,7 +223,7 @@ MCP `review_worker_status`:
 
 - 모든 변경 파일의 diff와 base/head 내용을 읽습니다. 페이지 상한·자료 크기 제한·생략 diff·binary·submodule·UTF-8이 아닌 변경을 만나면 부분 검토를 성공 처리하지 않습니다.
 - GitLab 자료 기본 한도는 1,000,000 UTF-8 bytes입니다. CLI 입력은 최신 팀 맥락까지 포함해 최대 2MiB, stdout/stderr는 각각 최대 200,000 bytes, 기본 실행 제한은 180초입니다. Jira 자체의 이슈·이력·설명 한도는 [팀 작업 맥락](TEAM-CONTEXT.md)의 생략 표시를 유지합니다.
-- CLI는 코드·명령·테스트를 실행하지 않습니다. 테스트 성공을 직접 확인한 결과로 남기지 않습니다. MR 작성자가 보고한 결과는 `reported`, 미확인은 `unknown`으로 남깁니다.
+- CLI에는 수집 자료의 정적 검토만 요청합니다. 테스트 성공을 직접 확인한 결과로 남기지 않으며 직접 실행 성공·실패를 주장한 결과도 검증에서 거부합니다. 코드와 요구사항을 읽고 대조한 사실은 구현 근거에 기록하며 검증을 실행한 결과로 바꾸지 않도록 공유 검토 지침에 명시했습니다. MR 작성자가 보고한 결과는 `reported`, 미확인은 `unknown`으로 남깁니다. Codex의 도구 비활성 설정과 이벤트 검사는 CLI 자체의 모든 도구 제거를 보장하지 않습니다.
 - 변경되지 않은 호출부나 저장소 전체를 자동 탐색하지 않습니다. 변경 파일과 제공한 근거만 정적으로 검토하므로 자료 밖 동작은 미확인으로 남깁니다.
 - 결정 이유는 기존 MR 설명·댓글·Jira 진술에 근거가 있을 때만 기록합니다. 확인하지 못한 이유는 `reason: null`입니다. MR 양식을 바꿀 필요는 없습니다.
 - 자동 리뷰는 제목·설명·소스 브랜치에서 Jira키를 연결합니다. 키가 없으면 MR·SHA·변경 파일 기준으로 누적하며 Jira 완료 조건을 추정하지 않습니다.
@@ -209,7 +235,9 @@ MCP `review_worker_status`:
 
 테스트는 임시 SQLite·가상 웹훅·모의 GitLab/Jira/모델/Mattermost 응답을 사용합니다. 실제 운영 계정으로 코드 읽기·댓글 게시·DM 도착을 확인하지 않았습니다. 설치 후에는 본인에게 허용된 시험 MR로 HTTPS 수신, 대상 계정, 댓글 작성 권한, CLI 인증·자료 한도, DM 정책을 확인합니다. 검증 중 실제 외부 쓰기를 원하지 않으면 자동 활성화 값을 `0`으로 유지합니다.
 
-2026-10-20 기준 전체 테스트 218개 중 217개 통과·실패 0개·Windows 파일 링크 권한으로 1개 생략, MCP 도구 34개 smoke와 수신기 smoke가 통과했습니다. 설치한 CLI의 필요한 옵션 지원은 확인했으며 실제 모델 호출은 수행하지 않았습니다.
+2026-10-20 기준 전체 테스트 227개 중 226개 통과·실패 0개·Windows 파일 링크 권한으로 1개 생략, MCP 도구 34개 smoke와 수신기 smoke가 통과했습니다. Codex·Claude 각각의 모의 CLI로 실제 HTTP 웹훅·stdio MCP·리뷰·기록·댓글·DM 연결을 확인했습니다.
+
+Codex CLI `0.154.0`의 기존 ChatGPT 로그인으로 합성 코드와 합성 Jira 요구사항을 전달해 실제 리뷰도 실행했습니다. 수량 0에서 예외를 요구하지만 0을 반환하는 코드를 `hold`로 판단했고, 구현 기록 1개·검증 기록 1개를 포함한 결과가 `normalizeReviewResult`를 통과했습니다. 이 확인에는 실제 GitLab·Jira·Mattermost 조회나 쓰기를 사용하지 않았습니다. 운영 프로젝트의 실제 댓글 게시·DM 도착은 별도 검증 대상입니다.
 
 주요 검증 명령은 저장소 루트에서 실행합니다.
 

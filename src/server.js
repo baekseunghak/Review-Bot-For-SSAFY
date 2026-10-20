@@ -89,6 +89,7 @@ register("review_worker_status", {
   description: "Show automatic-review configuration readiness and durable job stages/errors without private review bodies. The enabled worker processes authenticated webhook requests through code review, memory, MR comment and author Mattermost DM. It never approves or merges an MR. Notification delivery marked unknown needs an explicit retry choice.",
   inputSchema: z.object({ limit: z.int().min(1).max(100).optional().default(20) }), annotations: readOnly,
 }, ({ limit }) => ({ enabled: automaticSettings.enabled, configured: automaticSettings.ready,
+  provider: automaticSettings.provider ?? null, model: automaticSettings.model ?? null,
   missing: automaticSettings.missing, ...(automaticSettings.error ? { error: automaticSettings.error } : {}),
   active: Boolean(automaticWorker?.task), lastResult: automaticWorker?.lastResult ?? null, ...reviewInbox.workerStatus({ limit }) }));
 

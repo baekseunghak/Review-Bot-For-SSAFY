@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { UserError } from "./core.js";
 import { normalizeReviewResult, ClaudeReviewRunner } from "./review-runner.js";
+import { CodexReviewRunner } from "./codex-review-runner.js";
 import { GitlabReviewClient } from "./review-gitlab.js";
 import { MattermostReviewNotifier } from "./review-notifier.js";
 
@@ -148,9 +149,12 @@ export class ReviewWorker {
 
 export function createConfiguredReviewWorker({ inbox, contextService, mattermost, settings }) {
   if (!settings.ready) throw new UserError("Enable automatic review and configure its GitLab host, project IDs and notification channel first.");
+  const provider = settings.provider ?? "claude";
+  if (!["claude", "codex"].includes(provider)) throw new UserError("Unsupported review provider.");
+  const Runner = provider === "codex" ? CodexReviewRunner : ClaudeReviewRunner;
   return new ReviewWorker({ inbox, contextService,
     gitlab: new GitlabReviewClient({ host: settings.host, allowedProjectIds: settings.projectIds }),
-    runner: new ClaudeReviewRunner({ command: settings.command, timeoutMs: settings.timeoutMs }),
+    runner: new Runner({ command: settings.command, model: settings.model, timeoutMs: settings.timeoutMs }),
     notifier: new MattermostReviewNotifier({ service: mattermost, channelName: settings.channelName }),
     intervalMs: settings.intervalMs });
 }

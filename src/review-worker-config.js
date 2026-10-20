@@ -20,13 +20,17 @@ export function workerSettings(env = process.env) {
   }
   const channelName = env.REVIEWBOT_MATTERMOST_CHANNEL?.trim() || "";
   if (channelName && (!/^[\p{L}\p{N}](?:[\p{L}\p{N} ._-]*[\p{L}\p{N}._-])?$/u.test(channelName) || channelName.length > 64)) throw new UserError("Invalid REVIEWBOT_MATTERMOST_CHANNEL.");
-  const command = env.REVIEWBOT_REVIEW_COMMAND?.trim() || "claude";
+  const provider = env.REVIEWBOT_REVIEW_PROVIDER?.trim().toLowerCase() || "claude";
+  if (!["claude", "codex"].includes(provider)) throw new UserError("REVIEWBOT_REVIEW_PROVIDER must be claude or codex.");
+  const command = env.REVIEWBOT_REVIEW_COMMAND?.trim() || provider;
   if (command.length > 2048 || /[\x00-\x1f\x7f]/.test(command)) throw new UserError("Invalid REVIEWBOT_REVIEW_COMMAND.");
+  const model = env.REVIEWBOT_REVIEW_MODEL?.trim() || null;
+  if (model !== null && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(model)) throw new UserError("Invalid REVIEWBOT_REVIEW_MODEL.");
   const missing = [];
   if (!host) missing.push("REVIEWBOT_GITLAB_HOST");
   if (!projectIds.length) missing.push("REVIEWBOT_GITLAB_PROJECT_IDS");
   if (!channelName) missing.push("REVIEWBOT_MATTERMOST_CHANNEL");
-  return { dataDir, enabled, ready: enabled && !missing.length, missing, host: host.toLowerCase(), projectIds, channelName, command,
+  return { dataDir, enabled, ready: enabled && !missing.length, missing, host: host.toLowerCase(), projectIds, channelName, provider, command, model,
     intervalMs: integer(env.REVIEWBOT_WORKER_INTERVAL_MS, 5000, 1000, 300_000, "REVIEWBOT_WORKER_INTERVAL_MS"),
     timeoutMs: integer(env.REVIEWBOT_REVIEW_TIMEOUT_MS, 180_000, 1000, 900_000, "REVIEWBOT_REVIEW_TIMEOUT_MS") };
 }

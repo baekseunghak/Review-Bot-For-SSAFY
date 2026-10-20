@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { UserError } from "../src/core.js";
-import { ClaudeReviewRunner, normalizeReviewResult, REVIEW_RESULT_SCHEMA } from "../src/review-runner.js";
+import { ClaudeReviewRunner, normalizeReviewResult, REVIEW_RESULT_SCHEMA, REVIEW_SYSTEM_PROMPT } from "../src/review-runner.js";
 
 const context = {
   status: "fresh", headSha: "a".repeat(40), contextVersion: "b".repeat(64),
@@ -93,6 +93,18 @@ test("비대화 CLI는 stdin 자료와 비공개 임시 cwd만 받고 도구·MC
   assert.match(call.args[call.args.indexOf("--system-prompt") + 1], /테스트를 실행하지 않습니다/);
 });
 
+test("Claude의 모델은 명시했을 때만 전달하고 잘못된 모델 인수를 거부한다", async () => {
+  const fake = fakeRunner();
+  await new ClaudeReviewRunner({ model: "fixture-model", spawnImpl: fake.spawnImpl }).review({ context });
+  assert.equal(fake.calls[0].args[fake.calls[0].args.indexOf("--model") + 1], "fixture-model");
+  for (const model of ["", "fixture model", "--flag", "x".repeat(129), false]) {
+    assert.throws(() => new ClaudeReviewRunner({ model }), UserError);
+  }
+  const defaultFake = fakeRunner();
+  await new ClaudeReviewRunner({ spawnImpl: defaultFake.spawnImpl }).review({ context });
+  assert.equal(defaultFake.calls[0].args.includes("--model"), false);
+});
+
 test("본문은 기존 판정 조건과 실제 팀 맥락 인용을 지키며 보류는 코드 근거를 요구한다", () => {
   const hold = holdReview();
   assert.deepEqual(normalizeReviewResult(hold, { context }), hold);
@@ -113,6 +125,8 @@ test("본문은 기존 판정 조건과 실제 팀 맥락 인용을 지키며 �
 });
 
 test("실행하지 않은 테스트 성공·추측한 결정 이유·비밀값이나 전체 멘션을 거부한다", () => {
+  assert.ok(REVIEW_SYSTEM_PROMPT.includes(REVIEW_RESULT_SCHEMA.properties.memory.properties.validations.description));
+  assert.match(REVIEW_RESULT_SCHEMA.properties.memory.properties.validations.description, /정적 코드 대조.*implementation.*remainingWork.*passed\/failed.*observed.*금지/);
   for (const mutate of [
     (value) => { value.memory.validations = [{ check: "테스트 성공", result: "passed", basis: "observed", evidence: [{ kind: "test", ref: "fixture-test" }] }]; },
     (value) => { value.memory.decisions[0].reason = "추측한 이유"; },

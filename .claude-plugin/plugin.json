@@ -1,7 +1,7 @@
 {
   "name": "mmp",
   "displayName": "Review Bot for SSAFY",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Process GitLab review requests through code review, cumulative Jira context, MR comments and Mattermost notifications.",
   "author": {
     "name": "baekseunghak",

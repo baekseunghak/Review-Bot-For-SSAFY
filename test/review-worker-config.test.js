@@ -6,6 +6,9 @@ import test from "node:test";
 import { MattermostService } from "../src/core.js";
 import { workerSettings } from "../src/review-worker-config.js";
 import { MattermostReviewNotifier } from "../src/review-notifier.js";
+import { createConfiguredReviewWorker } from "../src/review-worker.js";
+import { ClaudeReviewRunner } from "../src/review-runner.js";
+import { CodexReviewRunner } from "../src/codex-review-runner.js";
 
 const settings = { REVIEWBOT_AUTO_REVIEW: "1", REVIEWBOT_GITLAB_HOST: "gitlab.example.test",
   REVIEWBOT_GITLAB_PROJECT_IDS: "10,20,10", REVIEWBOT_MATTERMOST_CHANNEL: "team-reviews" };
@@ -21,6 +24,29 @@ test("automatic publishing requires explicit activation and complete local setti
   assert.equal(enabled.timeoutMs, 180_000);
   assert.equal(enabled.intervalMs, 5000);
   assert.equal(enabled.command, "claude");
+  assert.equal(enabled.provider, "claude");
+  assert.equal(enabled.model, null);
+});
+
+test("provider selection chooses the matching runner, command and optional model without changing legacy installs", () => {
+  for (const [provider, Runner] of [["codex", CodexReviewRunner], ["claude", ClaudeReviewRunner]]) {
+    const selected = workerSettings({ ...settings, REVIEWBOT_REVIEW_PROVIDER: provider,
+      REVIEWBOT_REVIEW_COMMAND: "", REVIEWBOT_REVIEW_MODEL: "fixture-model" });
+    assert.equal(selected.provider, provider);
+    assert.equal(selected.command, provider);
+    assert.equal(selected.model, "fixture-model");
+    const worker = createConfiguredReviewWorker({ inbox: {}, contextService: {}, mattermost: {}, settings: selected });
+    assert.ok(worker.runner instanceof Runner);
+    assert.equal(worker.runner.command, provider);
+    assert.equal(worker.runner.model, "fixture-model");
+  }
+  assert.equal(workerSettings({ ...settings, REVIEWBOT_REVIEW_PROVIDER: " Codex ", REVIEWBOT_REVIEW_COMMAND: "C:\\Program Files\\Codex\\codex.exe" }).command,
+    "C:\\Program Files\\Codex\\codex.exe");
+  assert.throws(() => workerSettings({ ...settings, REVIEWBOT_REVIEW_PROVIDER: "typo" }), /REVIEWBOT_REVIEW_PROVIDER/);
+  for (const model of ["--flag", "two models", "model\nsecret", "x".repeat(129)]) {
+    assert.throws(() => workerSettings({ ...settings, REVIEWBOT_REVIEW_MODEL: model }), /REVIEWBOT_REVIEW_MODEL/);
+  }
+  assert.throws(() => createConfiguredReviewWorker({ settings: { ready: true, provider: "typo" } }), /Unsupported review provider/);
 });
 
 test("invalid host, worker intervals and unrecognized activation values fail safely", () => {

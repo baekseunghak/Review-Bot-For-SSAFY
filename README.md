@@ -42,7 +42,7 @@ GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하�
 | 리뷰 직전 MR·Jira 최신화와 등록 팀원의 관점 구성 | 구현됨. `review_context_prepare` 사용 |
 | 리뷰 완료 시 구현·결정 이유·검증·남은 작업 누적 | 구현됨. `review_context_complete`로 비공개 저장 |
 | 다음 리뷰에서 관련 누적 기록 자동 참조 | 구현됨. 준비 응답의 `reviewHistory`, 추가 조회는 `review_history_list` |
-| 새 수신함 → 코드 리뷰 → MR 댓글 → 작성자 Mattermost DM | 구현됨. 기본 비활성, 별도 CLI·계정·전송 설정 필요 |
+| 새 수신함 → 코드 리뷰 → MR 댓글 → 작성자 Mattermost DM | 구현됨. Codex CLI·Claude Code CLI 선택 지원, 기본 비활성, 별도 계정·전송 설정 필요 |
 | 작업 선점·만료 복구·단계별 재시도·상태 조회 | 구현됨. 게시 댓글 중복을 확인하고 불명 알림은 자동 재전송하지 않음 |
 | 새 수신함의 5분 API 폴링·웹훅 누락 복구 | 아직 구현되지 않음 |
 | 공개 HTTPS 수신 주소·호스팅·상시 서비스 설치 | 사용자가 별도 준비 |
@@ -51,7 +51,7 @@ GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하�
 
 인원 상한이 없다는 것은 무제한 성능을 보장한다는 뜻이 아닙니다. 인원이 늘면 Jira 조회량과 처리 시간이 늘며, 이슈·페이지·설명 길이·도구 실행 시간 제한은 그대로 적용됩니다.
 
-수동 MCP 사용에는 별도 모델 API 키가 필요하지 않습니다. 자동 리뷰는 로그인된 Claude Code CLI를 별도 프로세스로 실행하며 CLI의 인증·사용량을 사용합니다. 검토 자료에는 변경 diff·파일·MR 논의·Jira·과거 기록이 포함되므로 CLI가 연결한 모델 서비스에서 처리됩니다. 자동 리뷰를 사용하지 않으면 기존처럼 연결된 MCP 대화에서 직접 검토할 수 있습니다.
+수동 MCP 사용에는 별도 모델 API 키가 필요하지 않습니다. 자동 리뷰는 로그인된 Codex CLI 또는 Claude Code CLI를 별도 프로세스로 실행하며 선택한 CLI의 인증·사용량을 사용합니다. `REVIEWBOT_REVIEW_PROVIDER=codex`로 Codex를 선택합니다. 새 설정 예시는 Codex를 사용하며 기존 설정에서 provider를 생략하면 Claude를 유지합니다. 검토 자료에는 변경 diff·파일·MR 논의·Jira·과거 기록이 포함되므로 CLI가 연결한 모델 서비스에서 처리됩니다. 자동 리뷰를 사용하지 않으면 기존처럼 연결된 MCP 대화에서 직접 검토할 수 있습니다.
 
 ## 2. 동작 구조
 
@@ -90,12 +90,12 @@ MCP 클라이언트 <── stdio ──> MCP 서버 ─────────
 | 로컬 stdio를 지원하는 MCP 클라이언트 | MCP 도구 사용 | 클라이언트의 MCP 설정 확인 |
 | GitLab CLI `glab` | 실제 MR·코드 조회와 댓글 게시 | `glab --version` |
 | GitLab 계정과 대상 프로젝트 권한 | 조회 권한, 자동 게시에는 MR 댓글 작성 권한 | [7절](#7-gitlab-계정과-프로젝트-확인) |
-| Claude Code CLI 로그인 | 자동 리뷰를 켤 때 필요. 실제 실행 파일 권장 | `claude --version` |
+| Codex CLI 또는 Claude Code CLI 로그인 | 자동 리뷰를 켤 때 선택한 CLI 필요. 실제 실행 파일 권장 | `codex --version` 또는 `claude --version` |
 | Jira Cloud 계정·API 토큰·프로젝트 키 | 작업 동기화·주간 요약·팀 관점 리뷰 | [8절](#8-jira-cloud-연결) |
 | Mattermost Incoming Webhook | 메시지를 보낼 때만 필요 | [13절](#13-mattermost-설정) |
 | GitLab에서 접근 가능한 HTTPS 주소 | 실제 웹훅을 받을 때만 필요 | [12절](#12-gitlab-웹훅-수신기-연결) |
 
-현재 자동 테스트는 Windows + Node.js 24에서 확인했습니다. macOS·Linux용 명령도 제공하지만 운영 환경별 실행 검증은 별도로 진행하세요.
+현재 자동 테스트는 Windows + Node.js 24에서 확인했습니다. Codex CLI `0.154.0`의 기존 ChatGPT 로그인으로 합성 코드의 실제 리뷰와 결과 검증까지 확인했습니다. macOS·Linux용 명령도 제공하지만 운영 환경별 실행 검증은 별도로 진행하세요. 운영 서비스 연동을 포함한 검증 범위는 [자동 리뷰 운영](docs/AUTO-REVIEW.md#9-검증-범위)에 기록합니다.
 
 ### 처음 설정할 때의 순서
 
@@ -174,7 +174,9 @@ REVIEWBOT_PORT=8765
 REVIEWBOT_AUTO_REVIEW=0
 REVIEWBOT_GITLAB_HOST=gitlab.example.com
 REVIEWBOT_MATTERMOST_CHANNEL=team-reviews
-REVIEWBOT_REVIEW_COMMAND=claude
+REVIEWBOT_REVIEW_PROVIDER=codex
+REVIEWBOT_REVIEW_COMMAND=
+REVIEWBOT_REVIEW_MODEL=
 REVIEWBOT_REVIEW_TIMEOUT_MS=180000
 REVIEWBOT_WORKER_INTERVAL_MS=5000
 ```
@@ -199,7 +201,9 @@ macOS·Linux에서는 데이터 경로를 `/home/you/.reviewbot/team-a`처럼 �
 | `REVIEWBOT_AUTO_REVIEW` | 자동 리뷰 사용 | `1`일 때만 worker 시작. 기본 비활성 |
 | `REVIEWBOT_GITLAB_HOST` | 자동 리뷰 사용 | `gitlab.example.com` 같은 호스트명과 선택 포트. `https://`나 프로젝트 경로 제외 |
 | `REVIEWBOT_MATTERMOST_CHANNEL` | 자동 리뷰 사용 | 등록한 논리 채널 이름. 작성자 DM에 사용할 웹훅을 찾는 출처 |
-| `REVIEWBOT_REVIEW_COMMAND` | 선택 | 리뷰 CLI 실행 파일. 기본 `claude`, Windows는 실제 `.exe` 절대 경로 권장 |
+| `REVIEWBOT_REVIEW_PROVIDER` | 자동 리뷰 선택 | `codex` 또는 `claude`만 허용. 새 설정 예시는 `codex`, 미설정·빈 값은 기존 호환을 위해 `claude` |
+| `REVIEWBOT_REVIEW_COMMAND` | 선택 | 리뷰 CLI 실행 파일. 비우면 provider에 맞춰 `codex` 또는 `claude`. Windows는 실제 `.exe` 절대 경로 권장 |
+| `REVIEWBOT_REVIEW_MODEL` | 선택 | 선택한 CLI에 전달할 모델 ID. 비우면 CLI의 기본 선택을 사용. 계정에서 사용할 수 있는 모델 지정 |
 | `REVIEWBOT_REVIEW_TIMEOUT_MS` | 선택 | 모델 리뷰 제한 시간(ms). 기본 `180000` |
 | `REVIEWBOT_WORKER_INTERVAL_MS` | 선택 | 로컬 대기열 확인 간격(ms). 기본 `5000`, GitLab API 폴링 간격이 아님 |
 | `MATTERMOST_MCP_ALLOW_HTTP` | 선택 | 신뢰하는 로컬 Mattermost가 HTTP만 쓸 때 `1`. 기본 HTTPS |
@@ -557,10 +561,10 @@ https://reviewbot.example.com/webhooks/gitlab
 
 상세 설치와 복구 절차는 [자동 리뷰 운영](docs/AUTO-REVIEW.md)을 따릅니다. 자동 처리를 켜기 전에 다음 항목을 준비합니다.
 
-1. 같은 실행 계정에서 `glab`과 Claude Code CLI에 로그인합니다. 허용 GitLab 프로젝트에는 조회와 댓글 작성 권한이 필요합니다.
+1. 같은 실행 계정에서 `glab`과 사용할 Codex CLI 또는 Claude Code CLI에 로그인합니다. 허용 GitLab 프로젝트에는 조회와 댓글 작성 권한이 필요합니다. Codex는 `codex login` 후 `codex login status`로 확인합니다.
 2. 팀원 프로필·Jira 설정을 완료하고 `team_sync`가 성공하는지 확인합니다.
 3. [13절](#13-mattermost-설정)의 웹훅·논리 채널·작성자 참가자 매핑·`review-complete` 템플릿을 등록합니다. `REVIEWBOT_MATTERMOST_CHANNEL`에는 논리 채널 이름을 적습니다.
-4. `REVIEWBOT_GITLAB_HOST`와 기존 `REVIEWBOT_GITLAB_PROJECT_IDS`를 설정하고 `REVIEWBOT_AUTO_REVIEW=1`로 바꿉니다.
+4. `REVIEWBOT_GITLAB_HOST`와 기존 `REVIEWBOT_GITLAB_PROJECT_IDS`, 사용할 `REVIEWBOT_REVIEW_PROVIDER`를 설정하고 `REVIEWBOT_AUTO_REVIEW=1`로 바꿉니다.
 5. MCP 클라이언트를 재시작하거나, 소스 루트에서 아래 별도 worker를 실행합니다. 수신기는 별도 프로세스로 계속 실행해야 합니다.
 
 ```sh
@@ -569,7 +573,9 @@ node --env-file=.env bin/review-worker.mjs
 
 운영 환경변수를 이미 서비스에 전달했다면 `npm run worker:serve`도 같은 진입점을 실행합니다. `.env`는 npm 명령이 자동으로 읽지 않습니다. MCP와 별도 worker를 동시에 켜도 공유 lease로 한 요청을 선점하며, 데이터 경로가 서로 다르면 이 보장은 적용되지 않습니다.
 
-worker는 기본 5초마다 **로컬 SQLite 대기열**을 확인합니다. 모델은 명령·테스트를 실행하지 않고 수집한 자료만 검토합니다. 결과와 근거를 검증하고 비공개 누적 기록을 저장한 후, 현재 MR 상태와 SHA를 다시 확인하여 댓글을 게시합니다. MR 설명 양식은 바꾸지 않아도 됩니다. 판정의 `승인`은 댓글의 검토 결론이며 GitLab 승인·머지를 실행하지 않습니다.
+worker는 기본 5초마다 **로컬 SQLite 대기열**을 확인합니다. 선택한 CLI에 수집한 자료의 정적 검토를 요청하고 테스트 직접 실행 결과는 인정하지 않습니다. 결과와 근거를 검증하고 비공개 누적 기록을 저장한 후, 현재 MR 상태와 SHA를 다시 확인하여 댓글을 게시합니다. MR 설명 양식은 바꾸지 않아도 됩니다. 판정의 `승인`은 댓글의 검토 결론이며 GitLab 승인·머지를 실행하지 않습니다. CLI의 도구 비활성화·읽기 전용 설정과 이벤트 검증 범위는 [자동 리뷰 운영](docs/AUTO-REVIEW.md#2-필요한-계정과-프로그램)을 참고하세요.
+
+자동 리뷰는 새 비대화 CLI 실행으로 처리합니다. 현재 열려 있는 대화를 재개하거나 그 대화의 전체 내용을 자동으로 복사하지 않습니다. 이전 리뷰 맥락은 같은 비공개 데이터 디렉터리의 Jira·MR 누적 기록에서 다시 읽습니다. provider를 바꿔도 이 기록과 게시·알림 흐름은 그대로 사용합니다. 자세한 전환 절차는 [자동 리뷰 운영](docs/AUTO-REVIEW.md#2-필요한-계정과-프로그램)을 참고하세요.
 
 완료 DM은 MR 작성자의 GitLab 사용자명을 기존 Mattermost 참가자와 연결해 보냅니다. `REVIEWBOT_MATTERMOST_CHANNEL`은 웹훅 선택용이며 팀 채널에 리뷰 원문을 게시하는 설정이 아닙니다. DM에는 판정·SHA·게시 댓글 링크를 전달합니다. 알림 전송 여부가 불명확하면 `notification_unknown`으로 멈추고 자동 재전송하지 않습니다.
 
@@ -805,6 +811,9 @@ SQLite가 원본이고 Markdown은 읽기 위한 자료입니다. 각 리뷰 워
 | 웹훅 401 | Secret token·프록시 헤더 확인. Signing token만으로는 인증 불가 |
 | 웹훅 202인데 수신함이 비어 있음 | 응답 status/reason, 감지 계정·프로젝트·Draft/닫힘·멘션 제외 규칙 확인 |
 | 웹훅 수신 후 댓글이 안 달림 | `REVIEWBOT_AUTO_REVIEW=1`, 동일 데이터 경로, worker 실행과 `review_worker_status`의 단계·오류 확인 |
+| Codex를 골랐는데 Claude가 실행됨 | provider·command를 함께 확인. `REVIEWBOT_REVIEW_PROVIDER=codex`, 기존 `REVIEWBOT_REVIEW_COMMAND=claude`를 비우고 MCP·worker 재시작 |
+| Codex 실행 파일/인증 오류 | worker와 같은 OS 계정에서 `codex --version`·`codex login status`, PATH·실제 `.exe` 경로 확인. 앱 로그인만으로 CLI 로그인을 가정하지 않음 |
+| Codex 옵션/출력 오류 | 설치 CLI가 `exec --ignore-user-config --ignore-rules --ephemeral --json --output-schema`를 지원하는지 확인. 실패 시 다른 권한·provider로 자동 전환하지 않음 |
 | `notification_unknown` | 알림 전달 여부 불명. 실제 DM 도착을 확인하고 중복 가능성을 받아들일 때만 `allow_notification_duplicate: true`로 재시도 |
 | Mattermost 채널/DM 실패 | 채널 slug·접근 권한·웹훅 목적지 제한·수신자 매핑 확인 |
 | 리뷰 메시지 형식 오류 | 컨벤션 이름·멘션·MR 번호·Jira키·이모지·한 줄 message 확인 |
@@ -847,7 +856,8 @@ claude mcp remove reviewbot --scope user
 | `src/core.js` | 기존 Mattermost 서비스·저장 |
 | `src/review-config.js`, `src/review-inbox.js` | 수신 설정·이벤트 필터·수신함 |
 | `src/review-worker-config.js`, `src/review-worker.js` | 자동 실행 설정·선점·리뷰·게시·알림·복구 |
-| `src/review-gitlab.js`, `src/review-runner.js`, `src/review-notifier.js` | GitLab 전체 자료/게시·CLI 검토·Mattermost 작성자 DM |
+| `src/review-gitlab.js`, `src/review-notifier.js` | GitLab 전체 자료/게시·Mattermost 작성자 DM |
+| `src/review-runner.js`, `src/codex-review-runner.js`, `src/review-runner-process.js` | 공유 검토 기준·Claude/Codex CLI·입출력 제한과 임시 실행 폴더 |
 | `bin/review-worker.mjs` | 별도 worker 실행 |
 | `bin/gitlab-webhook.mjs` | 로컬 HTTP 수신기 |
 | `src/jira-client.js` | Jira Cloud 조회·페이지 순회·이력 정규화 |

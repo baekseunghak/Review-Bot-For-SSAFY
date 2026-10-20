@@ -23,6 +23,7 @@ async function installWorkerFixture() {
   const { PassThrough } = await import("node:stream");
   const { writeFileSync } = await import("node:fs");
   const effectsPath = process.env.REVIEWBOT_TEST_EFFECTS;
+  const provider = process.env.REVIEWBOT_REVIEW_PROVIDER || "claude";
   const sha = "a".repeat(40);
   const baseSha = "c".repeat(40);
   const mrUrl = "https://gitlab.example.test/team/repo/-/merge_requests/7";
@@ -78,7 +79,11 @@ async function installWorkerFixture() {
   fixtureExec[Symbol.for("nodejs.util.promisify.custom")] = async (file, args) => ({ stdout: JSON.stringify(glab(file, args)), stderr: "" });
   cp.execFile = fixtureExec;
   cp.spawn = (file, args, options) => {
-    if (file !== "claude" || !args.includes("--safe-mode") || !args.includes("--restricted") || options.shell !== false) return unexpected("Model runner options");
+    if (file !== provider || options.shell !== false) return unexpected("Model runner identity");
+    if (provider === "claude" && (!args.includes("--safe-mode") || !args.includes("--restricted"))) return unexpected("Claude runner options");
+    if (provider === "codex" && (args[0] !== "exec" || !args.includes("--ephemeral") || !args.includes("--json")
+      || !args.includes("--output-schema") || !args.includes("--ignore-user-config") || !args.includes("--ignore-rules")
+      || args[args.indexOf("--sandbox") + 1] !== "read-only")) return unexpected("Codex runner options");
     const child = new EventEmitter();
     child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
     child.kill = () => { queueMicrotask(() => child.emit("close", null)); return true; };
@@ -94,7 +99,11 @@ async function installWorkerFixture() {
         const result = { verdict: "approve", body: "## 리뷰 결과: 승인\n\n### 확인한 범위\n제공된 현재 코드만 정적으로 확인했고 테스트는 실행하지 않았습니다.\n\n### 작업 맥락\nTEST-1의 빈 입력 거부 조건을 `src/input.js:1`과 대조했습니다.",
           memory: { implementation: [{ summary: "빈 입력을 명시 오류로 거부한다.", basis: "observed", evidence: [{ kind: "code", ref: "src/input.js:1" }] }],
             decisions: [], validations: [{ check: "단위 테스트 실행", result: "not_run", basis: "unknown", evidence: [] }], remainingWork: [] } };
-        child.stdout.end(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: result }));
+        if (provider === "codex") {
+          child.stdout.end(`${JSON.stringify({ type: "item.completed", item: { id: "fixture-review", type: "agent_message", text: JSON.stringify(result) } })}\n${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })}\n`);
+        } else {
+          child.stdout.end(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: result }));
+        }
         child.emit("close", 0);
       } catch (error) { child.emit("error", error); }
     });
@@ -126,11 +135,11 @@ async function installWorkerFixture() {
   syncBuiltinESMExports();
 }
 
-async function startMcp(dataDir, effectsPath) {
+async function startMcp(dataDir, effectsPath, provider) {
   const env = { MATTERMOST_MCP_DATA_DIR: dataDir, REVIEWBOT_AUTO_REVIEW: "1", REVIEWBOT_GITLAB_HOST: "gitlab.example.test",
     REVIEWBOT_GITLAB_PROJECT_IDS: "10", REVIEWBOT_MATTERMOST_CHANNEL: "fixture-channel", REVIEWBOT_WORKER_INTERVAL_MS: "1000",
     REVIEWBOT_JIRA_BASE_URL: "https://jira.example.test", REVIEWBOT_JIRA_EMAIL: "fixture@example.test", REVIEWBOT_JIRA_API_TOKEN: "fixture-token",
-    REVIEWBOT_JIRA_PROJECT_KEY: "TEST", REVIEWBOT_TEST_EFFECTS: effectsPath };
+    REVIEWBOT_JIRA_PROJECT_KEY: "TEST", REVIEWBOT_TEST_EFFECTS: effectsPath, REVIEWBOT_REVIEW_PROVIDER: provider };
   for (const key of ["SystemRoot", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP", "ComSpec"]) if (process.env[key] !== undefined) env[key] = process.env[key];
   const preload = `data:text/javascript,${encodeURIComponent(`await (${installWorkerFixture.toString()})();`)}`;
   const child = spawn(process.execPath, ["--import", preload, join(root, "src/server.js")], { cwd: root, env, stdio: ["pipe", "pipe", "pipe"] });
@@ -172,7 +181,7 @@ async function startMcp(dataDir, effectsPath) {
   } catch (error) { await stop(); throw error; }
 }
 
-test("authenticated webhook drives the actual stdio MCP worker through review, memory, comment and author DM", { timeout: 20_000 }, async () => {
+for (const provider of ["claude", "codex"]) test(`authenticated webhook drives the actual stdio MCP worker through ${provider} review, memory, comment and author DM`, { timeout: 20_000 }, async () => {
   const temporaryRoot = realpathSync(tmpdir());
   const dataDir = mkdtempSync(join(temporaryRoot, "review-worker-protocol-"));
   let mcp;
@@ -201,7 +210,7 @@ test("authenticated webhook drives the actual stdio MCP worker through review, m
     const accepted = await deliver(); assert.equal(accepted.status, 202); await accepted.json();
     const duplicate = await deliver(); assert.equal(duplicate.status, 200); assert.equal((await duplicate.json()).status, "duplicate");
     const effectsPath = join(dataDir, "effects.json");
-    mcp = await startMcp(dataDir, effectsPath);
+    mcp = await startMcp(dataDir, effectsPath, provider);
     const listed = await mcp.request("tools/list");
     assert.equal(listed.result.tools.length, 34);
     for (const name of ["review_worker_status", "review_job_retry"]) assert.ok(listed.result.tools.some((tool) => tool.name === name));
