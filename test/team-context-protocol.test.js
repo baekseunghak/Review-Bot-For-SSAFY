@@ -83,7 +83,7 @@ function profile(index) {
   };
 }
 
-test("stdio MCP registers six profiles, persists responsibilities and distinguishes unconnected context from empty Jira work", { timeout: 20_000 }, async () => {
+test("stdio MCP registers ten profiles, persists responsibilities and distinguishes unconnected context from empty Jira work", { timeout: 20_000 }, async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "team-context-protocol-"));
   let mcp;
   try {
@@ -95,8 +95,9 @@ test("stdio MCP registers six profiles, persists responsibilities and distinguis
     assert.deepEqual((await mcp.tool("team_member_list")).data, []);
     const unknown = await mcp.tool("team_member_context", { member_id: "test-member-1" });
     assert.equal(unknown.isError, true);
+    assert.equal((await mcp.tool("team_weekly_summary")).isError, true);
 
-    for (let index = 1; index <= 6; index++) {
+    for (let index = 1; index <= 10; index++) {
       const args = profile(index);
       const created = await mcp.tool("team_member_upsert", args);
       assert.equal(created.isError, false);
@@ -107,13 +108,10 @@ test("stdio MCP registers six profiles, persists responsibilities and distinguis
       assert.ok(existsSync(file));
       assert.ok(readFileSync(file, "utf8").includes(args.review_focus[0]));
     }
-    assert.equal((await mcp.tool("team_member_list")).data.length, 6);
+    assert.equal((await mcp.tool("team_member_list")).data.length, 10);
     const updated = await mcp.tool("team_member_upsert", { ...profile(1), areas: ["Updated test area"] });
     assert.equal(updated.isError, false);
-    const tooMany = await mcp.tool("team_member_upsert", profile(7));
-    assert.equal(tooMany.isError, true);
-    assert.equal((await mcp.tool("team_member_list")).data.length, 6);
-    assert.equal(existsSync(join(dataDir, "people", "test-member-7", "profile.md")), false);
+    assert.equal(existsSync(join(dataDir, "people", "test-member-7", "profile.md")), true);
 
     for (const name of ["team_sync", "team_weekly_summary"]) {
       const result = await mcp.tool(name);
@@ -133,11 +131,11 @@ test("stdio MCP registers six profiles, persists responsibilities and distinguis
     mcp = await start(dataDir);
     const restored = await mcp.tool("team_member_list");
     assert.equal(restored.isError, false);
-    assert.equal(restored.data.length, 6);
+    assert.equal(restored.data.length, 10);
     assert.deepEqual(restored.data[0].areas, ["Updated test area"]);
-    const restoredContext = await mcp.tool("team_member_context", { member_id: "test-member-6" });
+    const restoredContext = await mcp.tool("team_member_context", { member_id: "test-member-10" });
     assert.equal(restoredContext.isError, false);
-    assert.equal(restoredContext.data.member.jiraAccountId, "test-member:6");
+    assert.equal(restoredContext.data.member.jiraAccountId, "test-member:10");
     assert.equal(restoredContext.data.sync.lastSuccessAt, null);
   } finally {
     await mcp?.stop();

@@ -278,10 +278,77 @@ test("weekly failure retries only after fifteen minutes and missing setup does n
   const unconfigured = fixture(t, { configured: false });
   assert.equal((await unconfigured.service.runWeeklyIfDue()).status, "not_configured");
   assert.equal(unconfigured.calls.length, 0);
-  const partial = fixture(t, { count: 5 });
-  assert.equal((await partial.service.runWeeklyIfDue()).status, "not_configured");
-  await assert.rejects(partial.service.prepareReview({ mrUrl: "https://gitlab.example.test/team/repo/-/merge_requests/1", author: { id: 1 }, headSha: SHA }), /six team members/);
-  assert.equal(partial.calls.length, 0);
+  const empty = fixture(t, { count: 0 });
+  assert.equal((await empty.service.runWeeklyIfDue()).status, "not_configured");
+  await assert.rejects(empty.service.syncMembers(), UserError);
+  await assert.rejects(empty.service.prepareReview({ mrUrl: "https://gitlab.example.test/team/repo/-/merge_requests/1", author: { id: 1 }, headSha: SHA }), UserError);
+  await assert.rejects(empty.service.refreshWeekly(), UserError);
+  assert.equal(empty.calls.length, 0);
+});
+
+for (const count of [1, 3, 7, 10]) {
+  test(`review and weekly summaries refresh exactly all ${count} registered members`, async (t) => {
+    const { service, store, responses, calls, setNow } = fixture(t, { count });
+    for (let index = 1; index <= count; index++) {
+      responses.set(`fixture-jira-${index}`, [issue(`DEMO-${index}`, { assigneeAccountId: `fixture-jira-${index}` })]);
+    }
+    const registered = service.listMembers();
+    const expectedIds = registered.map((profile) => profile.id);
+    const expectedAccounts = registered.map((profile) => profile.jiraAccountId);
+    const prepared = await service.prepareReview({
+      mrUrl: "https://gitlab.example.test/team/repo/-/merge_requests/1", author: { id: 1 },
+      changedPaths: [`component-${count}/src/check.js`], headSha: SHA,
+    });
+    assert.equal(prepared.perspectives.length, count);
+    assert.deepEqual(prepared.teamMemberIds, expectedIds);
+    assert.deepEqual(new Set(prepared.perspectives.map((view) => view.memberId)), new Set(expectedIds));
+    assert.deepEqual(calls, expectedAccounts);
+    assert.equal(prepared.perspectives[0].memberId, "member-1");
+    for (const view of prepared.perspectives) {
+      const profile = registered.find((person) => person.id === view.memberId);
+      assert.deepEqual(view.reviewFocus, profile.reviewFocus);
+      assert.equal(view.workItems.length, 1);
+      assert.equal(view.workItems[0].assigneeAccountId, profile.jiraAccountId);
+    }
+    setNow("2026-10-20T00:00:00.000Z");
+    const weekly = await service.runWeeklyIfDue();
+    assert.equal(weekly.status, "fresh");
+    assert.equal(weekly.summaries.length, count);
+    assert.deepEqual(new Set(weekly.summaries.map((summary) => summary.memberId)), new Set(expectedIds));
+    assert.deepEqual(calls, [...expectedAccounts, ...expectedAccounts]);
+    for (const summary of weekly.summaries) {
+      assert.equal(summary.path, join(store.dataDir, "people", summary.memberId, "weeks", "2026-10-19.md"));
+      assert.equal(summary.inProgress.length, 1);
+      assert.ok(readFileSync(summary.path, "utf8").includes(summary.displayName));
+      assert.equal(store.getSyncState(summary.memberId).lastSuccessAt, "2026-10-20T00:00:00.000Z");
+    }
+    assert.equal((await service.runWeeklyIfDue()).status, "already_claimed");
+    assert.equal(calls.length, count * 2);
+  });
+}
+
+test("adding members after this week's completion creates their summaries on the next scheduled run", async (t) => {
+  const { service, store, responses, calls } = fixture(t, { count: 1 });
+  responses.set("fixture-jira-1", [issue("DEMO-1")]);
+  const initial = await service.runWeeklyIfDue();
+  assert.equal(initial.status, "fresh");
+  assert.equal(initial.summaries.length, 1);
+  assert.equal((await service.runWeeklyIfDue()).status, "already_claimed");
+  for (const index of [2, 3]) {
+    service.upsertMember(member(index));
+    responses.set(`fixture-jira-${index}`, [issue(`DEMO-${index}`, { assigneeAccountId: `fixture-jira-${index}` })]);
+  }
+  const expanded = await service.runWeeklyIfDue();
+  assert.equal(expanded.status, "fresh");
+  assert.equal(expanded.summaries.length, 3);
+  assert.deepEqual(expanded.summaries.map((summary) => summary.memberId), ["member-1", "member-2", "member-3"]);
+  for (const summary of expanded.summaries) {
+    assert.ok(existsSync(summary.path));
+    assert.equal(store.getWeekly(summary.memberId, "2026-10-19").inProgress.length, 1);
+  }
+  assert.equal(calls.length, 4);
+  assert.equal((await service.runWeeklyIfDue()).status, "already_claimed");
+  assert.equal(calls.length, 4);
 });
 
 test("the scheduler starts a catch-up run and does not overlap a still-running refresh", async (t) => {

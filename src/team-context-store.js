@@ -221,7 +221,6 @@ export class TeamContextStore {
     return this.#save([[["people", id, "profile.md"], sourceMarkdown("담당자와 리뷰 관점", result)]], () => {
       const existing = this.db.prepare("SELECT id, jira_account_id FROM team_members WHERE id = ? COLLATE NOCASE").get(id);
       requireValue(!existing || existing.id === id);
-      requireValue(existing || Number(this.db.prepare("SELECT COUNT(*) AS count FROM team_members").get().count) < 6);
       this.db.prepare(`INSERT INTO team_members VALUES (?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET gitlab_username = excluded.gitlab_username,
         jira_account_id = excluded.jira_account_id, profile_json = excluded.profile_json`)
@@ -345,9 +344,12 @@ export class TeamContextStore {
     const result = this.db.prepare(`INSERT INTO team_weekly_runs VALUES (?, 'running', ?, 0, ?)
       ON CONFLICT(week_start) DO UPDATE SET status = 'running', lease_until = excluded.lease_until,
       retry_at = 0, owner_token = excluded.owner_token
-      WHERE team_weekly_runs.status <> 'done' AND
-        ((team_weekly_runs.status = 'running' AND team_weekly_runs.lease_until <= ?)
-          OR (team_weekly_runs.status = 'failed' AND team_weekly_runs.retry_at <= ?))`)
+      WHERE (team_weekly_runs.status = 'running' AND team_weekly_runs.lease_until <= ?)
+        OR (team_weekly_runs.status = 'failed' AND team_weekly_runs.retry_at <= ?)
+        OR (team_weekly_runs.status = 'done' AND EXISTS (
+          SELECT 1 FROM team_members AS member WHERE NOT EXISTS (
+            SELECT 1 FROM team_weekly AS summary
+            WHERE summary.member_id = member.id AND summary.week_start = excluded.week_start)))`)
       .run(weekStart, at + leaseMs, owner, at, at);
     if (result.changes) this.weeklyClaims.set(weekStart, owner);
     return Boolean(result.changes);

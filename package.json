@@ -1,6 +1,6 @@
 {
   "name": "mmp",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "type": "module",
   "description": "Local GitLab review inbox, Jira team context, weekly summaries, and Mattermost MCP server",

@@ -10,7 +10,7 @@ const bash = (command) => ({ tool_name: "Bash", tool_input: { command } });
 const at = (step, extra = {}) => () => ({ step, iid: 71, project: "group/repo", verdict: "hold", body: "본문", ...extra });
 const none = () => null;
 
-const contextState = () => {
+const contextState = (memberCount = 6) => {
   const headSha = "a".repeat(40);
   const contextVersion = "f".repeat(64);
   return {
@@ -20,12 +20,12 @@ const contextState = () => {
     context: {
       status: "fresh", headSha, contextVersion,
       relatedIssues: [{ key: "TEAM-12" }],
-      perspectives: Array.from({ length: 6 }, (_, i) => ({ memberId: `member-${i}`, displayName: `개발자 ${i}`, areas: ["src/api"], changedPaths: ["src/api/auth.js"] })),
+      perspectives: Array.from({ length: memberCount }, (_, i) => ({ memberId: `member-${i}`, displayName: `개발자 ${i}`, areas: ["src/api"], changedPaths: ["src/api/auth.js"] })),
     },
   };
 };
 
-test("신규 리뷰 기록에는 최신 6명 맥락과 작업 근거를 요구한다", () => {
+test("신규 리뷰 기록에는 최신 팀 맥락과 작업 근거를 요구한다", () => {
   const state = contextState();
   assert.match(reviewContextProblems(state, "## 리뷰 결과: 승인").join(), /작업 맥락/);
   assert.match(reviewContextProblems(state, "### 작업 맥락\n모두 확인함").join(), /Jira 키/);
@@ -34,6 +34,55 @@ test("신규 리뷰 기록에는 최신 6명 맥락과 작업 근거를 요구�
   assert.match(reviewContextProblems({ ...state, contextVersion: "0".repeat(64) }).join(), /최신 팀 작업 맥락/);
   assert.match(reviewContextProblems({ ...state, context: { ...state.context, perspectives: [] } }).join(), /최신 팀 작업 맥락/);
   assert.deepEqual(reviewContextProblems({ step: "prepared" }, "예전 수동 리뷰"), [], "진행 중이던 구버전 수동 상태 호환");
+});
+
+test("등록한 팀 규모가 1명이나 7명 이상이어도 전원의 관점이 있으면 리뷰할 수 있다", () => {
+  for (const count of [1, 7, 12]) {
+    const state = contextState(count);
+    state.context.teamMemberIds = state.context.perspectives.map((person) => person.memberId).reverse();
+    state.context.author = { memberId: "member-0" };
+    assert.deepEqual(reviewContextProblems(state, "### 작업 맥락\nTEAM-12 요구사항을 호출부와 대조함"), []);
+  }
+});
+
+test("빈 팀·중복 관점·등록 팀원 누락·등록되지 않은 작성자는 거부한다", () => {
+  const invalid = (change) => {
+    const state = contextState(7);
+    state.context.teamMemberIds = state.context.perspectives.map((person) => person.memberId);
+    state.context.author = { memberId: "member-0" };
+    change(state.context);
+    assert.match(reviewContextProblems(state).join(), /최신 팀 작업 맥락/);
+  };
+  invalid((context) => { context.perspectives = []; context.teamMemberIds = []; });
+  invalid((context) => { context.perspectives[1].memberId = "member-0"; });
+  invalid((context) => { context.perspectives[1].memberId = ""; });
+  invalid((context) => { context.perspectives[1] = null; });
+  invalid((context) => { context.perspectives.pop(); });
+  invalid((context) => { context.teamMemberIds.pop(); });
+  invalid((context) => { context.teamMemberIds[1] = "member-0"; });
+  invalid((context) => { context.teamMemberIds[1] = "unregistered"; });
+  invalid((context) => { context.teamMemberIds = []; });
+  invalid((context) => { context.teamMemberIds = null; });
+  invalid((context) => { context.author.memberId = "unregistered"; });
+  invalid((context) => { delete context.author; });
+});
+
+test("이전 리뷰 상태는 팀원 목록 필드 없이도 고유한 관점과 유효한 작성자가 있으면 호환된다", () => {
+  for (const count of [1, 6, 8]) {
+    const state = contextState(count);
+    assert.deepEqual(reviewContextProblems(state), []);
+    state.context.author = { memberId: "member-0" };
+    assert.deepEqual(reviewContextProblems(state), []);
+    state.context.author.memberId = "unregistered";
+    assert.match(reviewContextProblems(state).join(), /최신 팀 작업 맥락/);
+    delete state.context.author;
+    state.context.perspectives[0].memberId = undefined;
+    assert.match(reviewContextProblems(state).join(), /최신 팀 작업 맥락/);
+  }
+  assert.match(reviewContextProblems(contextState(0)).join(), /최신 팀 작업 맥락/);
+  const duplicate = contextState(6);
+  duplicate.context.perspectives[1].memberId = "member-0";
+  assert.match(reviewContextProblems(duplicate).join(), /최신 팀 작업 맥락/);
 });
 
 test("record의 작업 근거 검사와 post의 최신 커밋 검사가 실제 흐름에서 적용된다", async () => {

@@ -430,7 +430,17 @@ export function reviewContextProblems(state, body) {
   const context = state.context;
   if (context?.status !== "fresh" || context.headSha !== state.headSha
     || !/^[a-f0-9]{64}$/i.test(context.contextVersion ?? "") || context.contextVersion !== state.contextVersion
-    || !Array.isArray(context.perspectives) || context.perspectives.length !== 6) {
+    || !Array.isArray(context.perspectives) || context.perspectives.length === 0) {
+    return ["최신 팀 작업 맥락이 없습니다. prepare부터 다시 실행하세요."];
+  }
+  const perspectiveIds = context.perspectives.map((person) => person?.memberId);
+  const uniqueIds = new Set(perspectiveIds);
+  const hasTeamMemberIds = Object.hasOwn(context, "teamMemberIds");
+  if (perspectiveIds.some((id) => typeof id !== "string" || !id.trim()) || uniqueIds.size !== perspectiveIds.length
+    || (hasTeamMemberIds && (!Array.isArray(context.teamMemberIds) || context.teamMemberIds.length !== perspectiveIds.length
+      || new Set(context.teamMemberIds).size !== context.teamMemberIds.length
+      || context.teamMemberIds.some((id) => !uniqueIds.has(id))))
+    || ((hasTeamMemberIds || context.author?.memberId !== undefined) && !uniqueIds.has(context.author?.memberId))) {
     return ["최신 팀 작업 맥락이 없습니다. prepare부터 다시 실행하세요."];
   }
   if (body === undefined) return [];

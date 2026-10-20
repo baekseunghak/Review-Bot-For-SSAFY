@@ -66,7 +66,7 @@ register("review_pending_list", {
 }, (args) => reviewInbox.listPending(args));
 
 register("team_member_upsert", {
-  description: "Register or replace one of six team review profiles. Use stable Jira accountId and GitLab numeric ID when available; paths are repository-relative directory or file prefixes. This stores local context only.",
+  description: "Register or replace a team review profile. There is no fixed team size or member-count cap. Use stable Jira accountId and GitLab numeric ID when available; paths are repository-relative directory or file prefixes. This stores local context only.",
   inputSchema: z.object({
     id: z.string().min(1).max(96), display_name: name, gitlab_username: username,
     gitlab_user_id: z.int().positive().nullable().optional(), jira_account_id: z.string().min(1).max(256),
@@ -95,12 +95,12 @@ register("team_member_context", {
 }, ({ member_id, offset, limit }) => teamContext.memberContext({ memberId: member_id, offset, limit }));
 
 register("team_weekly_summary", {
-  description: "Refresh all six Jira profiles and save private Monday summaries: prior week's completed transitions, current in-progress and active-sprint planned work. Also runs automatically at Monday 09:00 Asia/Seoul while this MCP process is alive, with restart catch-up.",
+  description: "Refresh all registered team members' Jira profiles and save private Monday summaries: prior week's completed transitions, current in-progress and active-sprint planned work. At least one member is required. Also runs automatically at Monday 09:00 Asia/Seoul while this MCP process is alive, with restart catch-up.",
   inputSchema: z.object({}), annotations: refresh,
 }, () => teamContext.refreshWeekly());
 
 register("review_context_prepare", {
-  description: "Before reviewing an MR, read its live GitLab author, SHA, linked Jira keys and all changed paths using authenticated glab, refresh all six Jira profiles, and return six relevant review perspectives. Rejects failed refresh or a changed head. Review the code using this context and cite actual work-context evidence; no comment is posted by this tool.",
+  description: "Before reviewing an MR, read its live GitLab author, SHA, linked Jira keys and all changed paths using authenticated glab, refresh every registered team member's Jira profile, and return their review perspectives. At least one member is required. Rejects failed refresh or a changed head. Review the code using this context and cite actual work-context evidence; no comment is posted by this tool.",
   inputSchema: z.object({ mr_url: z.url().max(2048) }), annotations: refresh,
 }, async ({ mr_url }) => {
   try { return await prepareMrContext({ mrUrl: mr_url, contextService: teamContext }); }

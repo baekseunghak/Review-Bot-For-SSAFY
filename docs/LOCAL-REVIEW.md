@@ -1,6 +1,6 @@
 # 로컬 리뷰 수신함
 
-MMP의 기존 stdio MCP와 Mattermost 기능을 유지하면서 GitLab 요청을 로컬 수신함에 보관합니다. 수신함은 수집·조회 단계입니다. 별도 `review_context_prepare`의 GitLab/Jira 조회와 여섯 명의 작업 맥락·주간 요약은 [팀 작업 맥락](TEAM-CONTEXT.md)에 설명합니다. 5분 폴링과 수신함에서 리뷰·게시까지의 자동 처리는 후속 작업입니다.
+MMP의 기존 stdio MCP와 Mattermost 기능을 유지하면서 GitLab 요청을 로컬 수신함에 보관합니다. 수신함은 수집·조회 단계입니다. 별도 `review_context_prepare`의 GitLab/Jira 조회와 등록 팀원의 작업 맥락·주간 요약은 [팀 작업 맥락](TEAM-CONTEXT.md)에 설명합니다. 5분 폴링과 수신함에서 리뷰·게시까지의 자동 처리는 후속 작업입니다.
 
 ## 구성
 

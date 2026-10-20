@@ -42,10 +42,11 @@ function rawIssue(index, statusId = "2") {
   };
 }
 
-test("loopback Jira REST flows through the real client, weekly files and refreshed six-perspective MR context", { timeout: 20_000 }, async () => {
+test("loopback Jira REST flows through the real client, weekly files and every registered MR perspective", { timeout: 20_000 }, async () => {
+  const memberCount = 7;
   const temporaryRoot = realpathSync(tmpdir());
   const dataDir = mkdtempSync(join(temporaryRoot, "team-context-integration-"));
-  const records = new Map(Array.from({ length: 6 }, (_, i) => {
+  const records = new Map(Array.from({ length: memberCount }, (_, i) => {
     const index = i + 1;
     return [`TEST-${index}`, rawIssue(index, index === 1 ? "3" : [3, 5, 6].includes(index) ? "1" : "2")];
   }));
@@ -116,8 +117,8 @@ test("loopback Jira REST flows through the real client, weekly files and refresh
     });
     const store = new TeamContextStore({ dataDir });
     service = new TeamContextService({ store, jiraClient, now: () => new Date(clock) });
-    for (let index = 1; index <= 6; index++) service.upsertMember(profile(index));
-    assert.equal(service.listMembers().length, 6);
+    for (let index = 1; index <= memberCount; index++) service.upsertMember(profile(index));
+    assert.equal(service.listMembers().length, memberCount);
     const readPrivate = (file) => {
       const inside = relative(dataDir, file);
       assert.equal(isAbsolute(inside), false);
@@ -128,7 +129,7 @@ test("loopback Jira REST flows through the real client, weekly files and refresh
     const weekly = await service.refreshWeekly();
     assert.equal(weekly.status, "fresh");
     assert.equal(weekly.weekStart, "2026-10-19");
-    assert.equal(weekly.summaries.length, 6);
+    assert.equal(weekly.summaries.length, memberCount);
     assert.deepEqual(weekly.summaries[0].completed.map((issue) => issue.key), ["TEST-1"]);
     assert.deepEqual(weekly.summaries[1].inProgress.map((issue) => issue.key), ["TEST-2"]);
     assert.deepEqual(weekly.summaries[2].planned.map((issue) => issue.key), ["TEST-3"]);
@@ -149,7 +150,8 @@ test("loopback Jira REST flows through the real client, weekly files and refresh
     const first = await prepareMrContext({ mrUrl, contextService: service, runImpl });
     assert.equal(first.status, "fresh");
     assert.equal(first.headSha, SHA);
-    assert.equal(first.perspectives.length, 6);
+    assert.equal(first.perspectives.length, memberCount);
+    assert.deepEqual(first.teamMemberIds, service.listMembers().map((member) => member.id));
     assert.equal(first.perspectives[0].memberId, "member-2");
     assert.equal(first.perspectives[0].relevance, "author");
     assert.equal(first.perspectives[1].memberId, "member-3");
@@ -157,7 +159,7 @@ test("loopback Jira REST flows through the real client, weekly files and refresh
     assert.deepEqual(first.relatedIssues.map((issue) => issue.key), ["TEST-999"]);
     assert.equal(store.getIssuesForMember("member-2").some((issue) => issue.key === "TEST-999"), false);
     const firstMarkdown = readPrivate(first.path);
-    for (let index = 1; index <= 6; index++) assert.ok(firstMarkdown.includes(`검토 관점 ${index}`));
+    for (let index = 1; index <= memberCount; index++) assert.ok(firstMarkdown.includes(`검토 관점 ${index}`));
     assert.match(firstMarkdown, /완료 조건 999/);
 
     clock = NEXT_DAY;
@@ -173,7 +175,7 @@ test("loopback Jira REST flows through the real client, weekly files and refresh
     assert.match(second.relatedIssues[0].description, /변경된 완료 조건/);
     assert.match(readPrivate(second.path), /변경된 완료 조건/);
     assert.equal(service.memberContext({ memberId: "member-2" }).sync.lastSuccessAt, NEXT_DAY);
-    assert.equal(calls.filter((call) => call.path === "/rest/api/3/search/jql").length, 18);
+    assert.equal(calls.filter((call) => call.path === "/rest/api/3/search/jql").length, memberCount * 3);
     assert.equal(calls.filter((call) => call.path === "/rest/api/3/issue/TEST-999").length, 2);
     assert.ok(calls.some((call) => call.path === "/rest/api/3/status/3"));
     assert.equal(glabCalls.filter((args) => !args[1].includes("/diffs?")).length, 4);

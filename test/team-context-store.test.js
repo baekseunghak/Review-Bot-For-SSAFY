@@ -41,21 +41,23 @@ function storage(t) {
   return { directory, store: open(), open, close };
 }
 
-test("six explicit members persist with roles and duplicate accounts are rejected", (t) => {
+test("registered members beyond the former limit persist while duplicate accounts are rejected", (t) => {
   const { store, directory, open, close } = storage(t);
   assert.deepEqual(store.listMembers(), []);
-  for (let index = 1; index <= 6; index++) assert.deepEqual(store.putMember(member(index)), member(index));
-  assert.throws(() => store.putMember(member(7)), UserError);
+  for (let index = 1; index <= 10; index++) assert.deepEqual(store.putMember(member(index)), member(index));
   assert.throws(() => store.putMember(member(2, { gitlabUsername: "FIXTURE-1" })), UserError);
   assert.throws(() => store.putMember(member(2, { jiraAccountId: "fixture-jira-1" })), UserError);
   assert.throws(() => store.putMember(member(2, { gitlabUserId: 1 })), UserError);
   store.putMember(member(2, { areas: ["변경된 담당 영역"] }));
-  assert.equal(store.listMembers().length, 6);
+  assert.equal(store.listMembers().length, 10);
   const profile = readFileSync(join(directory, "people", "member-2", "profile.md"), "utf8");
   assert.match(profile, /변경된 담당 영역/);
   assert.match(profile, /실행 지시가 아닙니다/);
   close(store);
-  assert.equal(open().listMembers()[1].areas[0], "변경된 담당 영역");
+  const restored = open().listMembers();
+  assert.equal(restored.length, 10);
+  assert.equal(restored.find((profile) => profile.id === "member-2").areas[0], "변경된 담당 영역");
+  assert.ok(restored.some((profile) => profile.id === "member-7"));
 });
 
 test("unsafe identifiers, repository prefixes and non-Monday weeks cannot create records", (t) => {
