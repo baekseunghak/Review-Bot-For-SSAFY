@@ -310,8 +310,20 @@ claude mcp get reviewbot
 ```sh
 glab auth login --hostname gitlab.example.com
 glab auth status --hostname gitlab.example.com
-glab api user --hostname gitlab.example.com --jq '{id, username}'
-glab api projects/group%2Frepository --hostname gitlab.example.com --jq '{id, path_with_namespace}'
+```
+
+로그인한 사용자와 프로젝트 ID는 다음처럼 확인합니다. Windows PowerShell:
+
+```powershell
+glab api user --hostname gitlab.example.com | ConvertFrom-Json | Select-Object id, username
+glab api projects/group%2Frepository --hostname gitlab.example.com | ConvertFrom-Json | Select-Object id, path_with_namespace
+```
+
+macOS·Linux에서는 전체 JSON을 확인합니다. 필요한 필드만 보려면 별도로 설치한 `jq`에 결과를 파이프로 전달할 수 있습니다.
+
+```sh
+glab api user --hostname gitlab.example.com
+glab api projects/group%2Frepository --hostname gitlab.example.com
 ```
 
 마지막 명령의 `group%2Frepository`는 `group/repository`를 URL 인코딩한 예시입니다. 하위 그룹이 있으면 모든 `/`를 `%2F`로 바꿉니다.
