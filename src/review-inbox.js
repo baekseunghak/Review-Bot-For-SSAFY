@@ -459,8 +459,8 @@ export class ReviewInbox {
     if (typeof allowNotificationDuplicate !== "boolean") throw new UserError("Invalid notification retry choice.");
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const row = this.db.prepare("SELECT * FROM review_executions WHERE request_id = ? AND status = 'failed'").get(requestId);
-      if (!row) throw new UserError("Only a failed review execution can be retried.");
+      const row = this.db.prepare("SELECT * FROM review_executions WHERE request_id = ? AND status IN ('failed', 'retry')").get(requestId);
+      if (!row) throw new UserError("Only a failed or waiting review execution can be retried.");
       const uncertain = ["notifying", "notification_unknown"].includes(row.stage);
       if (uncertain && !allowNotificationDuplicate) throw new UserError("Notification delivery is uncertain; retry requires explicit duplicate-delivery permission.");
       const stage = uncertain ? "posted" : row.stage;

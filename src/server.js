@@ -94,7 +94,7 @@ register("review_worker_status", {
   active: Boolean(automaticWorker?.task), lastResult: automaticWorker?.lastResult ?? null, ...reviewInbox.workerStatus({ limit }) }));
 
 register("review_job_retry", {
-  description: "Requeue a failed automatic-review job, preserving completed stages. An enabled worker will resume external posting/notification automatically. Set allow_notification_duplicate=true only when intentionally retrying an uncertain Mattermost delivery; it may already have arrived. This retries notification only and never republishes a completed MR comment.",
+  description: "Explicitly requeue a failed or backoff-waiting automatic-review job now, resetting its attempt budget and preserving completed stages. Running and completed jobs cannot be requeued. An enabled worker will resume external posting/notification automatically. Set allow_notification_duplicate=true only when intentionally retrying an uncertain Mattermost delivery; it may already have arrived. This retries notification only and never republishes a completed MR comment.",
   inputSchema: z.object({ request_id: z.int().positive(), allow_notification_duplicate: z.boolean().optional().default(false) }),
   annotations: { ...mutate, openWorldHint: true },
 }, ({ request_id, allow_notification_duplicate }) => reviewInbox.retryFailed(request_id, { allowNotificationDuplicate: allow_notification_duplicate }));

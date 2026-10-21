@@ -182,6 +182,25 @@ test("ordinary failed reviews can be retried without notification permission", (
   assert.throws(() => instance.workerStatus({ limit: 0 }), UserError);
 });
 
+test("explicit retry advances a waiting job without duplicating a running or completed job", (t) => {
+  const { instance } = fixture(t);
+  send(instance);
+  const job = instance.claimNext({ now: NOW });
+  instance.checkpoint(job.id, job.leaseToken, { stage: "reviewing", artifact: { marker: "fixture" }, now: NOW });
+  instance.retry(job.id, job.leaseToken, { errorCode: "runner_response_invalid", delayMs: 60_000, now: NOW });
+  assert.equal(instance.claimNext({ now: LATER }), null);
+  assert.deepEqual(instance.retryFailed(job.id, { now: LATER }), {
+    requestId: job.id, status: "retry", stage: "reviewing", nextAttemptAt: LATER,
+  });
+  const resumed = instance.claimNext({ now: LATER });
+  assert.equal(resumed.id, job.id);
+  assert.equal(resumed.attempt, 1);
+  assert.equal(resumed.artifact.marker, "fixture");
+  assert.throws(() => instance.retryFailed(job.id, { now: LATER }), UserError);
+  instance.finish(resumed.id, resumed.leaseToken, { now: LATER });
+  assert.throws(() => instance.retryFailed(job.id, { now: LATER }), UserError);
+});
+
 test("successful notification finishes atomically with its completed stage", (t) => {
   const { instance } = fixture(t);
   send(instance);
