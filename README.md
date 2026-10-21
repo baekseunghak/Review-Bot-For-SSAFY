@@ -833,6 +833,7 @@ SQLite가 원본이고 Markdown은 읽기 위한 자료입니다. 각 리뷰 워
 | Codex 옵션/출력 오류 | 설치 CLI가 `exec --ignore-user-config --ignore-rules --ephemeral --json --output-schema`를 지원하는지 확인. 실패 시 다른 권한·provider로 자동 전환하지 않음 |
 | 이미지가 포함된 MR | JPEG·PNG·GIF·WebP·ICO의 확장자와 헤더가 일치하면 이미지 메타데이터만 남기고 코드·문서를 검토. 댓글에 이미지 미검토 건수를 자동 표시. SVG는 XML 코드로만 검토하며 실제 화면·이미지를 확인하지 않음 |
 | `unsupported_content` / `no_reviewable_text` | 지원하지 않는 바이너리·인코딩·서브모듈·형식 전환은 별도 검토 필요. 이미지뿐인 MR은 검토할 텍스트가 없어 승인·완료 알림 없이 중단. [지원 범위](docs/AUTO-REVIEW.md#8-자료-범위와-한계) 확인 |
+| `notification_setup_missing` / `review_author_unmapped` | 활성 알림 채널·작성자의 Mattermost 수신자·팀원 GitLab/Jira 연결을 확인. 계정을 추측해 등록하지 않으며 설정 보완 후 `review_job_retry`로 재개 |
 | `notification_unknown` | 알림 전달 여부 불명. 실제 DM 도착을 확인하고 중복 가능성을 받아들일 때만 `allow_notification_duplicate: true`로 재시도 |
 | Mattermost 채널/DM 실패 | 채널 slug·접근 권한·웹훅 목적지 제한·수신자 매핑 확인 |
 | 리뷰 메시지 형식 오류 | 컨벤션 이름·멘션·MR 번호·Jira키·이모지·한 줄 message 확인 |

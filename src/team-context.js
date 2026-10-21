@@ -196,7 +196,7 @@ export class TeamContextService {
     const member = author?.id != null
       ? members.find((item) => item.gitlabUserId === author.id) ?? members.find((item) => item.gitlabUserId == null && item.gitlabUsername.toLowerCase() === author?.username?.toLowerCase())
       : members.find((item) => item.gitlabUsername.toLowerCase() === author?.username?.toLowerCase());
-    if (!member) throw new UserError("The MR author is not mapped to a registered team member.");
+    if (!member) throw Object.assign(new UserError("The MR author is not mapped to a registered team member."), { code: "review_author_unmapped" });
     const projectSpecification = loadProjectSpecification({ dataDir: this.dataDir, mrUrl });
     const synced = await this.syncMembers();
     if (synced.status !== "fresh") throw new UserError("Jira refresh failed for one or more members. Previous snapshots remain available, but a fresh review context was not prepared.");

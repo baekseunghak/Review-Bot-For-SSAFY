@@ -9,6 +9,8 @@ const STATES = new Set(["opened", "closed", "merged", "locked"]);
 const USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$/;
 const ERROR_MESSAGES = new Map(Object.entries({
   notification_unknown: "Mattermost 알림의 도착 여부가 불명확합니다. 확인 없이 자동으로 다시 보내지 않습니다.",
+  notification_setup_missing: "활성 알림 채널과 MR 작성자의 GitLab·Mattermost 계정 연결 1개가 필요합니다. 설정을 보완한 뒤 명시적으로 재시도하세요.",
+  review_author_unmapped: "MR 작성자가 팀원으로 연결되지 않았습니다. GitLab·Jira 계정과 담당 영역을 등록한 뒤 명시적으로 재시도하세요.",
   review_step_failed: "상세 원인이 기록되지 않은 오류입니다. 이 코드만으로 원인을 확정할 수 없습니다.",
   runner_configuration_invalid: "리뷰 실행기 설정값이 허용된 형식이나 범위를 벗어났습니다.",
   input_too_large: "검토 자료가 실행기의 입력 크기 제한을 초과했습니다.",

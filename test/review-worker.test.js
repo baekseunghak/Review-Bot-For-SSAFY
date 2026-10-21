@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { ReviewInbox } from "../src/review-inbox.js";
 import { GitlabReviewClient } from "../src/review-gitlab.js";
+import { MattermostReviewNotifier } from "../src/review-notifier.js";
 import { ReviewWorker } from "../src/review-worker.js";
 import { TeamContextService } from "../src/team-context.js";
 import { TeamContextStore } from "../src/team-context-store.js";
@@ -222,6 +223,56 @@ test("이미지만 있는 MR은 검토할 텍스트가 없음을 기록하고 �
   assert.equal(f.calls.reviews.length, 0);
   assert.equal(f.notes.length, 0);
   assert.equal(f.calls.notifications.length, 0);
+});
+
+test("알림 채널·작성자 연결이 빠지거나 중복되면 검토 전에 명확한 설정 오류로 멈춘다", async (t) => {
+  for (const setting of [
+    { channels: [], participants: [{ id: 1, mention: "@fixture" }] },
+    { channels: [{ enabled: false }], participants: [{ id: 1, mention: "@fixture" }] },
+    { channels: [{ enabled: true }], participants: [] },
+    { channels: [{ enabled: true }], participants: [{ id: 1 }, { id: 2 }] },
+  ]) {
+    const f = fixture(t);
+    const notifier = new MattermostReviewNotifier({ channelName: "fixture", service: {
+      listChannels: () => setting.channels, listParticipants: () => setting.participants,
+      previewMessage: () => assert.fail("Invalid setup cannot prepare a message"),
+      sendDirectMessage: () => assert.fail("Invalid setup cannot send a message"),
+    } });
+    f.send();
+    const worker = f.makeWorker({ notifier });
+    assert.deepEqual(await worker.runOnce(), { status: "failed", requestId: 1, code: "notification_setup_missing" });
+    const status = f.inbox.workerStatus().jobs[0];
+    assert.equal(status.status, "failed");
+    assert.equal(status.attempt, 1);
+    assert.equal(status.nextAttemptAt, null);
+    assert.match(status.lastErrorMessage, /GitLab·Mattermost.*명시적으로 재시도/);
+    f.advance(1_000_000);
+    assert.deepEqual(await worker.runOnce(), { status: "idle" });
+    assert.equal(f.calls.jira.length, 0);
+    assert.equal(f.calls.reviews.length, 0);
+    assert.equal(f.notes.length, 0);
+    assert.equal(f.calls.notifications.length, 0);
+  }
+});
+
+test("팀원 미등록 작성자는 Jira·모델·게시 호출 없이 등록 조치가 필요한 오류로 멈춘다", async (t) => {
+  const f = fixture(t);
+  f.changeMr({ author: { id: 100, username: "unregistered.author" } });
+  f.send();
+  const worker = f.makeWorker();
+  assert.deepEqual(await worker.runOnce(), { status: "failed", requestId: 1, code: "review_author_unmapped" });
+  const status = f.inbox.workerStatus().jobs[0];
+  assert.equal(status.status, "failed");
+  assert.equal(status.attempt, 1);
+  assert.equal(status.nextAttemptAt, null);
+  assert.match(status.lastErrorMessage, /GitLab·Jira.*담당 영역.*명시적으로 재시도/);
+  f.advance(1_000_000);
+  assert.deepEqual(await worker.runOnce(), { status: "idle" });
+  assert.equal(f.calls.jira.length, 0);
+  assert.equal(f.calls.reviews.length, 0);
+  assert.equal(f.notes.length, 0);
+  assert.equal(f.calls.notifications.length, 0);
+  assert.equal(f.contextService.reviewHistory().total, 0);
 });
 
 test("다음 커밋 자동 리뷰는 이전 구현 기록을 다시 참고하며 새 기록을 누적한다", async (t) => {

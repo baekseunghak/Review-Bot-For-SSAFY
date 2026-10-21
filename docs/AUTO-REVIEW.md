@@ -214,6 +214,8 @@ MCP `review_worker_status`:
 | `runner_response_invalid` | 완료 이벤트·허용된 이벤트 형식·JSON 해석 검사 |
 | `unsupported_content` | 지원하지 않는 바이너리·인코딩·서브모듈 또는 이미지와 텍스트 간 형식 전환 |
 | `no_reviewable_text` | 이미지 제외 후 검토할 코드·텍스트가 없어 자동 리뷰 중단 |
+| `notification_setup_missing` | 활성 알림 채널 또는 작성자의 GitLab·Mattermost 수신자 연결 누락/중복. 설정 후 명시적 재시도 필요 |
+| `review_author_unmapped` | 작성자의 GitLab 계정과 팀원 프로필 연결 누락. 팀원 등록 후 명시적 재시도 필요 |
 | `review_result_invalid`, `review_body_invalid`, `review_sections_invalid` | 리뷰 JSON 구조·공개 본문·필수 섹션 및 판정 형식 |
 | `review_context_invalid`, `review_locations_invalid` | 작업 맥락 인용 또는 실제 코드 파일·줄 근거 |
 | `review_memory_invalid`, `review_test_claim_invalid` | 누적 기록의 출처·형식 또는 실행하지 않은 검증의 직접 확인 주장 |
@@ -255,7 +257,7 @@ MCP `review_worker_status`:
 
 자동화된 테스트는 임시 SQLite·가상 웹훅·모의 GitLab/Jira/모델/Mattermost 응답을 사용합니다. 각 설치의 운영 계정·주소·권한·DM 정책은 별도로 검증해야 합니다. 설치 후에는 본인에게 허용된 시험 MR로 HTTPS 수신, 대상 계정, 댓글 작성 권한, CLI 인증·자료 한도, DM 정책을 확인합니다. 검증 중 실제 외부 쓰기를 원하지 않으면 자동 활성화 값을 `0`으로 유지합니다.
 
-2026-10-21 기준 전체 테스트 264개 중 263개 통과·실패 0개·Windows 파일 링크 권한으로 1개 생략, MCP 도구 34개 smoke와 수신기 smoke가 통과했습니다. Codex·Claude 각각의 모의 CLI로 실제 HTTP 웹훅·stdio MCP·리뷰·기록·댓글·DM 연결을 확인했습니다. 코드·이미지 혼합 MR에서 이미지 바이트 제외와 댓글의 미검토 범위 고지·중복 방지도 검증했습니다. Codex 통합 검증에는 실제로 확인한 `Code mode will fail closed` 시작 안내 순서도 포함합니다.
+2026-10-21 기준 전체 테스트 266개 중 265개 통과·실패 0개·Windows 파일 링크 권한으로 1개 생략, MCP 도구 34개 smoke와 수신기 smoke가 통과했습니다. Codex·Claude 각각의 모의 CLI로 실제 HTTP 웹훅·stdio MCP·리뷰·기록·댓글·DM 연결을 확인했습니다. 코드·이미지 혼합 MR에서 이미지 바이트 제외와 댓글의 미검토 범위 고지·중복 방지도 검증했습니다. Codex 통합 검증에는 실제로 확인한 `Code mode will fail closed` 시작 안내 순서도 포함합니다.
 
 Codex CLI `0.154.0`의 기존 ChatGPT 로그인으로 합성 코드와 합성 Jira 요구사항을 전달해 실제 리뷰도 실행했습니다. 수량 0에서 예외를 요구하지만 0을 반환하는 코드를 `hold`로 판단했고, 구현 기록 1개·검증 기록 1개를 포함한 결과가 `normalizeReviewResult`를 통과했습니다. 이 확인에는 실제 GitLab·Jira·Mattermost 조회나 쓰기를 사용하지 않았습니다. 운영 프로젝트의 실제 댓글 게시·DM 도착은 별도 검증 대상입니다.
 

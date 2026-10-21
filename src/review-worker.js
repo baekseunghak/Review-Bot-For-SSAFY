@@ -7,7 +7,7 @@ import { MattermostReviewNotifier } from "./review-notifier.js";
 
 function problem(code) { return Object.assign(new UserError("Automatic review could not complete. Check the worker job status."), { code }); }
 const OBSOLETE = new Set(["request_obsolete", "stale_head", "review_not_open"]);
-const TERMINAL = new Set(["comment_conflict", "duplicate_comment", "unsupported_content", "no_reviewable_text", "context_too_large", "incomplete_context"]);
+const TERMINAL = new Set(["comment_conflict", "duplicate_comment", "unsupported_content", "no_reviewable_text", "context_too_large", "incomplete_context", "notification_setup_missing", "review_author_unmapped"]);
 
 export class ReviewWorker {
   constructor({ inbox, gitlab, contextService, runner, notifier, now = () => new Date(),
