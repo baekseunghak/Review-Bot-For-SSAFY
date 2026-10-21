@@ -65,7 +65,7 @@ Windows에서 `codex`·`claude`가 `.cmd` 또는 PowerShell 스크립트로만 �
 
 두 provider 모두 비공개 임시 작업 폴더에서 실행하고 검토 자료는 stdin으로 전달합니다. Codex는 `exec --ignore-user-config --ignore-rules --ephemeral`, 읽기 전용 sandbox, 승인 요청 비활성, 구조화 출력을 사용합니다. 셸·웹 검색·앱·훅·플러그인·보조 에이전트·스킬 검색·Code Mode 등도 비활성화 설정을 전달합니다. 출력에 명령·도구 실행 이벤트가 있으면 결과를 게시하지 않고 실패 처리합니다. 이 설정이 CLI의 모든 내장 도구 제거를 보장하거나 읽기 전용 sandbox가 파일 읽기까지 막는다는 뜻은 아닙니다. 사용자 설정 무시는 시스템·조직의 관리 설정 전체 제거도 보장하지 않습니다. 검토 자료가 민감하거나 관리형 연결 기능이 있으면 전용 OS 계정·격리 환경의 접근 범위도 설정하세요.
 
-Codex 시작 과정의 Code Mode 호스트 비활성 안내는 CLI가 보내는 고정된 문구 1개만 검토 턴 시작 전에 한 번 허용합니다. 이 안내가 direct tools로의 전환을 알리더라도 개별 기능 비활성·읽기 전용 설정은 유지합니다. 그 외 경고·오류·유사 문구·도구 실행 이벤트는 검토 결과로 받아들이지 않습니다.
+Codex 시작 과정의 Code Mode 호스트 비활성 안내는 확인된 두 고정 문구(`Falling back to direct tools` 또는 `Code mode will fail closed`) 중 하나만 검토 턴 시작 전에 한 번 허용합니다. 문구 전체가 정확히 일치해야 하며, 반복되거나 턴이 시작된 뒤 나오는 안내는 거부합니다. 개별 기능 비활성·읽기 전용 설정과 완료된 JSON 결과 검증은 유지하며, 그 외 경고·오류·유사 문구·도구 실행 이벤트는 검토 결과로 받아들이지 않습니다.
 
 Claude는 `--safe-mode`, `--restricted`, 도구 비활성, 빈 MCP 구성, 세션 미보관 설정으로 실행합니다. 저장소 훅이나 검토 자료에 적힌 명령을 실행하는 흐름은 제공하지 않습니다. 조직에서 강제한 CLI 설정·hook은 설치자가 확인해야 합니다. 필요한 옵션을 지원하지 않거나 허용되지 않은 실행 이벤트를 반환하면 작업을 실패 처리하며 다른 provider나 권한 모드로 자동 전환하지 않습니다. [Claude CLI 옵션](https://code.claude.com/docs/en/cli-reference), [관리 hook 설정](https://code.claude.com/docs/en/hooks#disable-or-remove-hooks).
 
@@ -251,7 +251,7 @@ MCP `review_worker_status`:
 
 자동화된 테스트는 임시 SQLite·가상 웹훅·모의 GitLab/Jira/모델/Mattermost 응답을 사용합니다. 각 설치의 운영 계정·주소·권한·DM 정책은 별도로 검증해야 합니다. 설치 후에는 본인에게 허용된 시험 MR로 HTTPS 수신, 대상 계정, 댓글 작성 권한, CLI 인증·자료 한도, DM 정책을 확인합니다. 검증 중 실제 외부 쓰기를 원하지 않으면 자동 활성화 값을 `0`으로 유지합니다.
 
-2026-10-20 기준 전체 테스트 231개 중 230개 통과·실패 0개·Windows 파일 링크 권한으로 1개 생략, MCP 도구 34개 smoke와 수신기 smoke가 통과했습니다. Codex·Claude 각각의 모의 CLI로 실제 HTTP 웹훅·stdio MCP·리뷰·기록·댓글·DM 연결을 확인했습니다.
+2026-10-21 기준 전체 테스트 252개 중 251개 통과·실패 0개·Windows 파일 링크 권한으로 1개 생략, MCP 도구 34개 smoke와 수신기 smoke가 통과했습니다. Codex·Claude 각각의 모의 CLI로 실제 HTTP 웹훅·stdio MCP·리뷰·기록·댓글·DM 연결을 확인했습니다. Codex 통합 검증에는 실제로 확인한 `Code mode will fail closed` 시작 안내 순서도 포함합니다.
 
 Codex CLI `0.154.0`의 기존 ChatGPT 로그인으로 합성 코드와 합성 Jira 요구사항을 전달해 실제 리뷰도 실행했습니다. 수량 0에서 예외를 요구하지만 0을 반환하는 코드를 `hold`로 판단했고, 구현 기록 1개·검증 기록 1개를 포함한 결과가 `normalizeReviewResult`를 통과했습니다. 이 확인에는 실제 GitLab·Jira·Mattermost 조회나 쓰기를 사용하지 않았습니다. 운영 프로젝트의 실제 댓글 게시·DM 도착은 별도 검증 대상입니다.
 

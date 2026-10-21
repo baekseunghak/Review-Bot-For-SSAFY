@@ -100,7 +100,14 @@ async function installWorkerFixture() {
           memory: { implementation: [{ summary: "빈 입력을 명시 오류로 거부한다.", basis: "observed", evidence: [{ kind: "code", ref: "src/input.js:1" }] }],
             decisions: [], validations: [{ check: "단위 테스트 실행", result: "not_run", basis: "unknown", evidence: [] }], remainingWork: [] } };
         if (provider === "codex") {
-          child.stdout.end(`${JSON.stringify({ type: "item.completed", item: { id: "fixture-review", type: "agent_message", text: JSON.stringify(result) } })}\n${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })}\n`);
+          const events = [
+            { type: "thread.started", thread_id: "fixture-thread" },
+            { type: "item.completed", item: { id: "startup-code-mode", type: "error", message: "Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`." } },
+            { type: "turn.started" },
+            { type: "item.completed", item: { id: "fixture-review", type: "agent_message", text: JSON.stringify(result) } },
+            { type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } },
+          ];
+          child.stdout.end(events.map((event) => JSON.stringify(event)).join("\n") + "\n");
         } else {
           child.stdout.end(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: result }));
         }

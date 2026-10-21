@@ -5,7 +5,10 @@ import { UserError } from "./core.js";
 import { normalizeReviewResult, REVIEW_RESULT_SCHEMA, REVIEW_SYSTEM_PROMPT } from "./review-runner.js";
 import { runReviewProcess, serializeReviewInput, validateRunnerConfiguration, withReviewWorkspace } from "./review-runner-process.js";
 
-const DISABLED_CODE_MODE_NOTICE = "Code Mode is unavailable because code-mode host is disabled. Falling back to direct tools; enable `features.code_mode_host` and install `codex-code-mode-host`.";
+const DISABLED_CODE_MODE_NOTICES = new Set([
+  "Code Mode is unavailable because code-mode host is disabled. Falling back to direct tools; enable `features.code_mode_host` and install `codex-code-mode-host`.",
+  "Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.",
+]);
 
 function runnerEnvironment(env) {
   const keep = /^(?:PATH|PATHEXT|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|LOCALAPPDATA|APPDATA|SYSTEMROOT|WINDIR|COMSPEC|TMP|TEMP|TMPDIR|LANG|LC_[A-Z_]+|TZ|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|CODEX_HOME)$/i;
@@ -27,7 +30,7 @@ function completedReview(output) {
         started = true;
       } else if (["item.started", "item.updated", "item.completed"].includes(event.type)) {
         if (event.type === "item.completed" && event.item?.type === "error" && !started && !response
-          && !disabledCodeModeNotice && event.item.message === DISABLED_CODE_MODE_NOTICE) {
+          && !disabledCodeModeNotice && DISABLED_CODE_MODE_NOTICES.has(event.item.message)) {
           // The host is deliberately disabled; the remaining tool and sandbox restrictions still apply.
           disabledCodeModeNotice = true;
           continue;

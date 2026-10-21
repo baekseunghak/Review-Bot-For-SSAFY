@@ -30,6 +30,8 @@ const message = (value = review()) => ({ type: "item.completed", item: { id: "fi
 const completed = { type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } };
 const disabledCodeModeNotice = { type: "item.completed", item: { id: "startup-code-mode", type: "error",
   message: "Code Mode is unavailable because code-mode host is disabled. Falling back to direct tools; enable `features.code_mode_host` and install `codex-code-mode-host`." } };
+const failClosedCodeModeNotice = { type: "item.completed", item: { id: "startup-code-mode", type: "error",
+  message: "Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`." } };
 
 function fakeRunner({ events = [message(), completed], raw, code = 0, stderr, hang = false, error, onInput } = {}) {
   const calls = [];
@@ -111,15 +113,31 @@ test("명시한 CLI 경로와 모델은 쉘 해석 없이 개별 인수로 전�
   }
 });
 
+test("Code Mode 차단 안내 문구가 바뀌어도 시작 전 안내 한 번과 완료된 JSON 응답은 허용한다", async () => {
+  const fake = fakeRunner({ events: [
+    { type: "thread.started", thread_id: "fixture-thread" }, failClosedCodeModeNotice,
+    { type: "turn.started" }, message(), completed,
+  ] });
+  assert.deepEqual(await new CodexReviewRunner({ spawnImpl: fake.spawnImpl }).review({ context }), review());
+  assert.equal(fake.calls.length, 1);
+  assert.equal(existsSync(fake.calls[0].options.cwd), false);
+});
+
 test("도구 실행 이벤트와 미완료·실패·잘못된 JSONL은 결과가 있어도 게시하지 않는다", async () => {
   const disallowed = ["command_execution", "mcp_tool_call", "file_change", "web_search", "collab_tool_call", "node_repl", "unknown_tool"];
   const cases = [
     ...disallowed.map((type) => ({ events: [{ type: "item.completed", item: { id: "tool", type, output: "fixture-private-token" } }, message(), completed] })),
     { events: [{ type: "item.completed", item: { id: "warning", type: "error", message: "fixture-private-token" } }, message(), completed] },
     { events: [{ type: "turn.started" }, disabledCodeModeNotice, message(), completed] },
+    { events: [{ type: "turn.started" }, failClosedCodeModeNotice, message(), completed] },
     { events: [disabledCodeModeNotice, disabledCodeModeNotice, message(), completed] },
+    { events: [failClosedCodeModeNotice, failClosedCodeModeNotice, message(), completed] },
+    { events: [disabledCodeModeNotice, failClosedCodeModeNotice, message(), completed] },
+    { events: [failClosedCodeModeNotice, disabledCodeModeNotice, message(), completed] },
     { events: [message(), disabledCodeModeNotice, completed] },
+    { events: [message(), failClosedCodeModeNotice, completed] },
     { events: [{ ...disabledCodeModeNotice, item: { ...disabledCodeModeNotice.item, message: disabledCodeModeNotice.item.message + " More." } }, message(), completed] },
+    { events: [{ ...failClosedCodeModeNotice, item: { ...failClosedCodeModeNotice.item, message: failClosedCodeModeNotice.item.message + " More." } }, message(), completed] },
     { events: [{ type: "error", message: disabledCodeModeNotice.item.message }, message(), completed] },
     { events: [message()] }, { events: [completed, message()] }, { events: [message(), completed, message()] },
     { events: [{ type: "turn.failed", error: { message: "fixture-private-token" } }] },
