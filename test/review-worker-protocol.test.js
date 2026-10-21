@@ -33,7 +33,7 @@ async function installWorkerFixture() {
   save();
   const mr = { project_id: 10, iid: 7, web_url: mrUrl, state: "opened", draft: false,
     author: { id: 11, username: "fixture.author" }, sha, diff_refs: { head_sha: sha, base_sha: baseSha, start_sha: baseSha },
-    title: "TEST-1 Input validation", description: "Reject empty input", source_branch: "feat/TEST-1", changes_count: "1" };
+    title: "TEST-1 Input validation", description: "Reject empty input", source_branch: "feat/TEST-1", changes_count: "2" };
   const issue = { key: "TEST-1", fields: { summary: "Input validation", description: "Reject empty input before processing",
     status: { id: "2", name: "In progress", statusCategory: { key: "indeterminate" } },
     assignee: { accountId: "fixture:1" }, updated: "2026-10-20T00:00:00.000Z", created: "2026-10-19T00:00:00.000Z", components: [] } };
@@ -47,12 +47,19 @@ async function installWorkerFixture() {
     if (endpoint.startsWith("projects/10/merge_requests/7/diffs?") && method === "GET") return [{
       old_path: "src/input.js", new_path: "src/input.js", diff: "@@ -1 +1,2 @@\n+if (!input) throw new Error('empty');\n process(input);",
       new_file: false, deleted_file: false, renamed_file: false, a_mode: "100644", b_mode: "100644",
+    }, {
+      old_path: "docs/screen.png", new_path: "docs/screen.png", diff: "",
+      new_file: true, deleted_file: false, renamed_file: false, a_mode: "0", b_mode: "100644",
     }];
     if (endpoint.startsWith("projects/10/repository/files/src%2Finput.js?ref=") && method === "GET") {
       const ref = endpoint.split("?ref=")[1];
       if (![sha, baseSha].includes(ref)) return unexpected("File ref");
       const source = ref === sha ? "if (!input) throw new Error('empty');\nprocess(input);\n" : "process(input);\n";
       return { encoding: "base64", file_path: "src/input.js", content: Buffer.from(source).toString("base64") };
+    }
+    if (endpoint === `projects/10/repository/files/docs%2Fscreen.png?ref=${sha}` && method === "GET") {
+      return { encoding: "base64", file_path: "docs/screen.png",
+        content: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aGfYAAAAASUVORK5CYII=" };
     }
     if (endpoint === "projects/10/merge_requests/7/notes" && method === "POST") {
       const payload = JSON.parse(input);
@@ -93,6 +100,9 @@ async function installWorkerFixture() {
       try {
         const data = JSON.parse(input);
         if (data.context?.status !== "fresh" || data.changes?.headSha !== sha || !data.changes?.files?.[0]?.headContent?.includes("throw new Error")) return unexpected("Incomplete model evidence");
+        if (data.changes.files.length !== 1 || data.changes.excludedImages?.length !== 1
+          || data.changes.excludedImages[0].newPath !== "docs/screen.png"
+          || /iVBORw0KGgo/.test(input)) return unexpected("Image scope metadata");
         effects.modelCalls++;
         effects.modelEvidence = { headSha: data.context.headSha, perspectives: data.context.perspectives.length, jiraKeys: data.context.relatedIssues.map((entry) => entry.key) };
         save();
@@ -239,6 +249,8 @@ for (const provider of ["claude", "codex"]) test(`authenticated webhook drives t
     assert.equal(effects.notification.channel, "@fixture.mm");
     assert.match(effects.notification.text, /#note_77/);
     assert.match(effects.notes[0].body, /<!-- reviewbot:[a-f0-9]{64} -->/);
+    assert.match(effects.notes[0].body, /이미지 1개는 시각적으로 확인하지 않았으며/);
+    assert.equal(effects.notes[0].body.match(/이미지 1개는 시각적으로 확인하지 않았으며/g).length, 1);
     const history = await mcp.tool("review_history_list", { jira_keys: ["TEST-1"] });
     assert.equal(history.isError, false); assert.equal(history.data.total, 1);
     assert.equal(history.data.records[0].headSha, SHA);

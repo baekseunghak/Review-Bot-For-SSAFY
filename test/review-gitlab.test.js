@@ -56,6 +56,7 @@ function fixture({ metadata = mr(), diffs = [diff()], notes = [], contents, afte
       const ref = url.searchParams.get("ref");
       const content = Buffer.from(contents?.({ filePath, ref }) ?? (ref === headSha ? "new\n" : "old\n"));
       return JSON.stringify({ file_path: filePath, encoding: "base64", content: content.toString("base64"),
+        size: content.length,
         content_sha256: createHash("sha256").update(content).digest("hex") });
     }
     throw new Error(`Unexpected fixture endpoint: ${endpoint}`);
@@ -175,6 +176,118 @@ test("전체 자료 또는 단일 파일이 한도를 넘으면 잘라서 성공
     const client = new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: fake.runImpl, maxContextBytes: 1024 });
     await assert.rejects(client.readReview(input), { code: "context_too_large" });
   }
+});
+
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=", "base64");
+const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xd9]);
+const imageDiff = (name, extra = {}) => diff({ old_path: name, new_path: name, diff: "", ...extra });
+const digest = (content) => createHash("sha256").update(content).digest("hex");
+
+test("코드와 JPEG·PNG가 섞인 MR은 이미지 원문 없이 변경 범위와 식별 메타데이터를 보존한다", async () => {
+  const diffs = [imageDiff("docs/screen.JPG", { new_file: true, a_mode: "0" }), diff(),
+    imageDiff("docs/old.png", { new_path: "docs/new.png", renamed_file: true })];
+  const { client } = fixture({ metadata: mr({ changes_count: "3" }), diffs,
+    contents: ({ filePath, ref }) => filePath.endsWith(".JPG") ? jpeg : filePath.endsWith(".png") ? png : ref === headSha ? "new\n" : "old\n" });
+  const result = await client.readReview(input);
+  assert.equal(result.files.length, 1);
+  assert.equal(result.files[0].newPath, "src/api.js");
+  assert.deepEqual(result.changedPaths, ["docs/screen.JPG", "src/api.js", "docs/old.png", "docs/new.png"]);
+  assert.deepEqual(result.excludedImages, [
+    { oldPath: "docs/screen.JPG", newPath: "docs/screen.JPG", newFile: true, deletedFile: false, renamedFile: false,
+      oldMode: "0", newMode: "100644", reason: "image_content_not_reviewed", base: null,
+      head: { size: jpeg.length, sha256: digest(jpeg), format: "jpeg" } },
+    { oldPath: "docs/old.png", newPath: "docs/new.png", newFile: false, deletedFile: false, renamedFile: true,
+      oldMode: "100644", newMode: "100644", reason: "image_content_not_reviewed",
+      base: { size: png.length, sha256: digest(png), format: "png" }, head: { size: png.length, sha256: digest(png), format: "png" } },
+  ]);
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(png.toString("base64")));
+  assert.equal(result.excludedImages[0].diff, undefined);
+});
+
+test("삭제·이름 변경한 이미지와 GIF·WebP·ICO는 각 커밋의 메타데이터만 남긴다", async () => {
+  const gif = Buffer.from([71, 73, 70, 56, 57, 97, 1, 0, 1, 0, 0, 0, 0]);
+  const webp = Buffer.concat([Buffer.from("RIFF"), Buffer.from([12, 0, 0, 0]), Buffer.from("WEBPVP8 "), Buffer.alloc(4)]);
+  const ico = Buffer.alloc(22); ico.writeUInt16LE(1, 2); ico.writeUInt16LE(1, 4);
+  const images = { "before.jpeg": jpeg, "after.jpg": jpeg, "old.gif": gif, "current.webp": webp, "icon.ico": ico };
+  const diffs = [diff(), imageDiff("before.jpeg", { new_path: "after.jpg", renamed_file: true }),
+    imageDiff("old.gif", { deleted_file: true, b_mode: "0" }),
+    imageDiff("current.webp", { new_file: true, a_mode: "000000" }), imageDiff("icon.ico")];
+  const { client, calls } = fixture({ metadata: mr({ changes_count: "5" }), diffs,
+    contents: ({ filePath, ref }) => images[filePath] ?? (ref === headSha ? "new\n" : "old\n") });
+  const result = await client.readReview(input);
+  assert.deepEqual(result.excludedImages.map((image) => image.head?.format ?? image.base.format), ["jpeg", "gif", "webp", "ico"]);
+  assert.equal(result.excludedImages[1].head, null);
+  assert.equal(result.excludedImages[2].base, null);
+  assert.ok(calls.some((call) => call.endpoint.endsWith(`before.jpeg?ref=${baseSha}`)));
+  assert.ok(calls.some((call) => call.endpoint.endsWith(`after.jpg?ref=${headSha}`)));
+  assert.ok(!calls.some((call) => call.endpoint.endsWith(`old.gif?ref=${headSha}`)));
+});
+
+test("SVG와 이미지 확장자의 UTF-8 텍스트는 일반 텍스트로 빠짐없이 리뷰한다", async () => {
+  const { client } = fixture({ metadata: mr({ changes_count: "2" }),
+    diffs: [diff({ old_path: "icon.svg", new_path: "icon.svg" }), diff({ old_path: "source.png", new_path: "source.png" })],
+    contents: ({ filePath, ref }) => filePath.endsWith(".svg") ? `<svg>${ref}</svg>` : `export const value = '${ref}';` });
+  const result = await client.readReview(input);
+  assert.equal(result.files.length, 2);
+  assert.deepEqual(result.excludedImages, []);
+  assert.match(result.files[0].headContent, /<svg>/);
+  assert.match(result.files[1].headContent, /export const/);
+});
+
+test("GitLab이 UTF-8로 변환한 텍스트는 원본 크기와 달라도 기존처럼 전체 내용을 리뷰한다", async () => {
+  const { client } = fixture({ intercept: ({ endpoint }) => {
+    if (!endpoint.includes("/repository/files/")) return undefined;
+    const content = Buffer.from(endpoint.endsWith(`ref=${headSha}`) ? "é" : "e", "utf8");
+    return { file_path: "src/api.js", encoding: "base64", content: content.toString("base64"),
+      size: 1, content_sha256: digest(content) };
+  } });
+  const result = await client.readReview(input);
+  assert.equal(result.files[0].baseContent, "e");
+  assert.equal(result.files[0].headContent, "é");
+  assert.deepEqual(result.excludedImages, []);
+});
+
+test("확장자만 이미지인 바이너리·잘못된 이미지 형식·이미지로 위장한 소스·이미지와 텍스트 전환은 차단한다", async () => {
+  for (const setting of [
+    { diffs: [diff(), imageDiff("source.png")], contents: ({ filePath }) => filePath === "source.png" ? Buffer.from([0, 1, 2]) : "source" },
+    { diffs: [diff(), imageDiff("source.png")], contents: ({ filePath }) => filePath === "source.png" ? jpeg : "source" },
+    { diffs: [diff(), imageDiff("source.js")], contents: ({ filePath }) => filePath === "source.js" ? png : "source" },
+    { diffs: [diff(), imageDiff("source.zip")], contents: ({ filePath }) => filePath === "source.zip" ? Buffer.from([80, 75, 3, 4, 0]) : "source" },
+    { diffs: [diff(), imageDiff("source.jpg")], contents: ({ filePath }) => filePath === "source.jpg" ? Buffer.from([0xff, 0xfe]) : "source" },
+    { diffs: [diff(), imageDiff("before.js", { new_path: "after.png", renamed_file: true })], contents: ({ filePath }) => filePath === "after.png" ? png : "source" },
+    { diffs: [diff(), imageDiff("before.png", { new_path: "after.js", renamed_file: true })], contents: ({ filePath }) => filePath === "before.png" ? png : "source" },
+    { diffs: [diff(), imageDiff("screen.png", { a_mode: "120000", b_mode: "120000" })], contents: ({ filePath }) => filePath === "screen.png" ? png : "source" },
+  ]) {
+    await assert.rejects(fixture({ metadata: mr({ changes_count: "2" }), ...setting }).client.readReview(input), { code: "unsupported_content" });
+  }
+});
+
+test("이미지 제외는 전체 diff·크기·checksum·최종 head 검증이나 이미지 전용 MR 중단을 우회하지 않는다", async () => {
+  const onlyImage = { diffs: [imageDiff("screen.png", { new_file: true, a_mode: "0" })], contents: () => png };
+  await assert.rejects(fixture(onlyImage).client.readReview(input), { code: "no_reviewable_text" });
+  await assert.rejects(fixture({ ...onlyImage, metadata: (reads) => reads === 1 ? mr() : mr({ sha: baseSha, diff_refs: { ...mr().diff_refs, head_sha: baseSha } }) })
+    .client.readReview(input), { code: "stale_head" });
+  await assert.rejects(fixture({ ...onlyImage, diffs: [imageDiff("screen.png", { collapsed: true })] }).client.readReview(input), { code: "incomplete_context" });
+  for (const invalid of [{ size: png.length + 1 }, { content_sha256: "0".repeat(64) }]) {
+    await assert.rejects(fixture({ ...onlyImage, intercept: ({ endpoint }) => endpoint.includes("/repository/files/")
+      ? { file_path: "screen.png", encoding: "base64", content: png.toString("base64"), ...invalid } : undefined })
+      .client.readReview(input), { code: "invalid_gitlab_response" });
+  }
+  const oversized = Buffer.concat([png, Buffer.alloc(1024)]);
+  const fake = fixture({ ...onlyImage, contents: () => oversized });
+  await assert.rejects(new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: fake.runImpl, maxContextBytes: 1024 })
+    .readReview(input), { code: "context_too_large" });
+});
+
+test("제외 이미지 바이트는 모델 컨텍스트에 넣지 않고 메타데이터만 집계한다", async () => {
+  const content = Buffer.concat([png, Buffer.alloc(15_000)]);
+  const diffs = [diff(), imageDiff("one.png", { new_file: true, a_mode: "0" }), imageDiff("two.png", { new_file: true, a_mode: "0" })];
+  const fake = fixture({ metadata: mr({ changes_count: "3" }), diffs,
+    contents: ({ filePath, ref }) => filePath.endsWith(".png") ? content : ref === headSha ? "new\n" : "old\n" });
+  const result = await new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: fake.runImpl, maxContextBytes: 20_000 }).readReview(input);
+  assert.equal(result.excludedImages.length, 2);
+  assert.ok(result.contextBytes < 4000);
+  assert.ok(JSON.stringify(result).length < 5000);
 });
 
 test("다른 MR·host·커밋·닫힘·draft와 수집 중 커밋 변경을 차단한다", async () => {

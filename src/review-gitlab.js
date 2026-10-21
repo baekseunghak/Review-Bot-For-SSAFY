@@ -28,6 +28,17 @@ function path(value) {
 
 function hash(value) { return createHash("sha256").update(value).digest("hex"); }
 
+function imageFormat(content) {
+  if (content.length >= 4 && content[0] === 0xff && content[1] === 0xd8 && content[2] === 0xff) return "jpeg";
+  if (content.length >= 24 && content.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    && content.toString("ascii", 12, 16) === "IHDR") return "png";
+  if (content.length >= 13 && ["GIF87a", "GIF89a"].includes(content.toString("ascii", 0, 6))) return "gif";
+  if (content.length >= 20 && content.toString("ascii", 0, 4) === "RIFF" && content.toString("ascii", 8, 12) === "WEBP"
+    && ["VP8 ", "VP8L", "VP8X"].includes(content.toString("ascii", 12, 16))) return "webp";
+  if (content.length >= 22 && content.readUInt32LE(0) === 0x00010000 && content.readUInt16LE(4) > 0) return "ico";
+  return null;
+}
+
 async function run(file, args, { input, ...options } = {}) {
   return new Promise((resolve, reject) => {
     const child = execFile(file, args, {
@@ -174,6 +185,8 @@ export class GitlabReviewClient {
     }
     const seen = new Set();
     const files = [];
+    const excludedImages = [];
+    const changedPaths = new Set();
     for (const diff of diffs) {
       if (!diff || typeof diff.diff !== "string" || diff.too_large || diff.collapsed) {
         fail("incomplete_context", "GitLab omitted a changed file diff. Automatic review cannot use partial context.");
@@ -188,23 +201,40 @@ export class GitlabReviewClient {
       const key = `${oldPath}\0${newPath}`;
       if (seen.has(key)) fail("incomplete_context", "GitLab returned duplicate changed files.");
       seen.add(key);
+      changedPaths.add(oldPath);
+      changedPaths.add(newPath);
       if (diff.a_mode === "160000" || diff.b_mode === "160000") fail("unsupported_content", "Submodule changes require a separate review and are not automatically reviewed.");
       const baseContent = diff.new_file ? null : await this.file(input.projectId, oldPath, baseSha);
-      if (baseContent !== null) consume(baseContent);
       const headContent = diff.deleted_file ? null : await this.file(input.projectId, newPath, snapshot.headSha);
+      const metadata = { oldPath, newPath, newFile: diff.new_file, deletedFile: diff.deleted_file,
+        renamedFile: diff.renamed_file, oldMode: diff.a_mode, newMode: diff.b_mode };
+      if ((baseContent !== null && typeof baseContent === "object") || (headContent !== null && typeof headContent === "object")) {
+        if (typeof baseContent === "string" || typeof headContent === "string") {
+          fail("unsupported_content", "A changed file switches between image and text content and requires a separate review.");
+        }
+        if ((baseContent !== null && !["100644", "100755"].includes(diff.a_mode))
+          || (headContent !== null && !["100644", "100755"].includes(diff.b_mode))) {
+          fail("unsupported_content", "Only regular image files can be excluded from text review.");
+        }
+        const excluded = { ...metadata, reason: "image_content_not_reviewed", base: baseContent, head: headContent };
+        consume(excluded);
+        excludedImages.push(excluded);
+        continue;
+      }
+      if (baseContent !== null) consume(baseContent);
       if (headContent !== null) consume(headContent);
       const emptyFileAddedOrDeleted = (diff.new_file && headContent === "") || (diff.deleted_file && baseContent === "");
       if (!diff.diff.trim() && baseContent !== headContent && !emptyFileAddedOrDeleted) {
         fail("incomplete_context", "GitLab returned an empty diff for changed file contents.");
       }
-      files.push({ oldPath, newPath, diff: diff.diff, newFile: Boolean(diff.new_file), deletedFile: Boolean(diff.deleted_file),
-        renamedFile: Boolean(diff.renamed_file), oldMode: diff.a_mode, newMode: diff.b_mode, baseContent, headContent });
+      files.push({ ...metadata, diff: diff.diff, baseContent, headContent });
     }
     const finalHead = await this.readHead(input);
     this.assertReady(finalHead, snapshot.headSha);
+    if (!files.length) fail("no_reviewable_text", "MR contains only excluded images and has no reviewable text. Image contents require a separate review.");
     return {
       ...snapshot, baseSha: baseSha.toLowerCase(), startSha: startSha.toLowerCase(), title, description,
-      notes, files, changedPaths: [...new Set(files.flatMap((file) => [file.oldPath, file.newPath]))],
+      notes, files, excludedImages, changedPaths: [...changedPaths],
       issueKeys: extractIssueKeys(title, description, mr.source_branch),
       mrSource: { title, description, descriptionTruncated: false }, contextBytes: bytes,
     };
@@ -224,6 +254,17 @@ export class GitlabReviewClient {
     if (content.length > this.maxContextBytes) fail("context_too_large", "A changed file exceeds the configured review byte limit.");
     if (result.content_sha256 && (typeof result.content_sha256 !== "string" || result.content_sha256.toLowerCase() !== hash(content))) {
       fail("invalid_gitlab_response", "GitLab file content checksum did not match.");
+    }
+    const format = imageFormat(content);
+    if (format) {
+      if (result.size !== undefined && (!Number.isSafeInteger(result.size) || result.size !== content.length)) {
+        fail("invalid_gitlab_response", "GitLab image content size did not match.");
+      }
+      const extension = /\.([^.\/]+)$/.exec(filePath)?.[1].toLowerCase();
+      if (extension !== format && !(format === "jpeg" && extension === "jpg")) {
+        fail("unsupported_content", "An image file signature does not match its filename extension.");
+      }
+      return { size: content.length, sha256: hash(content), format };
     }
     if (content.includes(0)) fail("unsupported_content", "Binary changed files require a separate review and are not automatically reviewed.");
     try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content); }

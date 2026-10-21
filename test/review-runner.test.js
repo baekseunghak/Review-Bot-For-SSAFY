@@ -205,6 +205,66 @@ test("확인된 보류 지적은 실제 수집 파일과 해당 base/head 코드
   assert.deepEqual(normalizeReviewResult(old, { context, changes: renamed }), old);
 });
 
+test("텍스트와 이미지가 함께 바뀐 승인은 물론 보류에도 이미지 미검토 범위를 한 번만 공개한다", async () => {
+  const changes = {
+    files: [{ oldPath: "src/input.js", newPath: "src/input.js", baseContent: "\n".repeat(10), headContent: "\n".repeat(10) }],
+    excludedImages: [{ oldPath: "assets/old[logo].png", newPath: "assets/logo(2).png" }],
+  };
+  const note = "이미지 1개는 시각적으로 확인하지 않았으며, 이미지 내용·모양은 검토 범위에서 제외했습니다.";
+  for (const value of [review(), holdReview()]) {
+    const normalized = normalizeReviewResult(value, { context, changes });
+    assert.ok(normalized.body.includes(`### 확인한 범위\n${note}\n\n`));
+    assert.equal(normalized.body.split(note).length - 1, 1);
+    assert.deepEqual(normalizeReviewResult(normalized, { context, changes }), normalized);
+    assert.deepEqual(normalizeReviewResult(normalized, { context }), normalized);
+    assert.deepEqual(normalized.memory, value.memory);
+  }
+  const fake = fakeRunner();
+  const actual = await new ClaudeReviewRunner({ spawnImpl: fake.spawnImpl }).review({ context, changes });
+  assert.ok(actual.body.includes(note));
+  assert.match(REVIEW_SYSTEM_PROMPT, /excludedImages.*시각적 내용은 확인하지 않았습니다/);
+  assert.match(REVIEW_SYSTEM_PROMPT, /SVG.*렌더링된 외관은 확인하지 않았습니다/);
+  assert.deepEqual(normalizeReviewResult(review(), { context, changes: { ...changes, excludedImages: [] } }), review());
+});
+
+test("제외된 이미지 경로나 가상 줄은 보류 근거와 읽은 코드 메모리로 사용할 수 없다", () => {
+  const changes = {
+    files: [{ oldPath: "src/input.js", newPath: "src/input.js", baseContent: "\n".repeat(10), headContent: "\n".repeat(10) }],
+    excludedImages: [{ oldPath: "assets/old[logo].png", newPath: "assets/logo(2).png" }],
+  };
+  for (const path of ["assets/old[logo].png", "assets/logo(2).png"]) {
+    const hold = holdReview();
+    hold.body = hold.body.replace("src/input.js:10", `${path}:1`);
+    assert.throws(() => normalizeReviewResult(hold, { context, changes }), { code: "review_locations_invalid" });
+    for (const ref of [path, `${path}:1`, `${path}:1 @ ${context.headSha}`, `${path} @ ${context.headSha}`]) {
+      for (const key of ["implementation", "decisions", "validations", "remainingWork"]) {
+        const value = review();
+        if (key === "remainingWork") value.memory.remainingWork = [{ summary: "이미지 확인 필요", basis: "unknown", evidence: [] }];
+        value.memory[key][0].evidence = [{ kind: "code", ref }];
+        assert.throws(() => normalizeReviewResult(value, { context, changes }), { code: "review_memory_invalid" });
+      }
+    }
+  }
+  const reported = review();
+  reported.memory.implementation.push({ summary: "작성자가 이미지 교체를 보고했다.", basis: "reported",
+    evidence: [{ kind: "mr_description", ref: "https://gitlab.example.test/project/-/merge_requests/1" }] });
+  assert.deepEqual(normalizeReviewResult(reported, { context, changes }).memory, reported.memory);
+});
+
+test("이미지 미검토 고지를 추가한 최종 본문도 최대 길이를 넘길 수 없다", () => {
+  const value = review();
+  const maximum = REVIEW_RESULT_SCHEMA.properties.body.maxLength;
+  const note = "이미지 1개는 시각적으로 확인하지 않았으며, 이미지 내용·모양은 검토 범위에서 제외했습니다.";
+  const changes = { files: [], excludedImages: [{ oldPath: "assets/logo.png", newPath: "assets/logo.png" }] };
+  value.body += "x".repeat(maximum - value.body.length);
+  assert.equal(normalizeReviewResult(value).body.length, maximum);
+  assert.throws(() => normalizeReviewResult(value, { context, changes }), { code: "review_body_invalid" });
+  value.body = value.body.slice(0, maximum - note.length - 2);
+  const normalized = normalizeReviewResult(value, { context, changes });
+  assert.equal(normalized.body.length, maximum);
+  assert.deepEqual(normalizeReviewResult(normalized, { context, changes }), normalized);
+});
+
 test("오류 출력·미완료 결과·JSON 파싱 오류의 원문을 외부로 노출하지 않는다", async () => {
   for (const options of [
     { error: "fixture-private-token", expectedCode: "runner_start_failed" },

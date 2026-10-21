@@ -20,6 +20,8 @@ const ERROR_MESSAGES = new Map(Object.entries({
   runner_timeout: "리뷰 실행이 설정된 시간 제한을 초과했습니다.",
   runner_exit_failed: "리뷰 CLI가 비정상 종료했습니다. 인증·지원 인수·사용 한도 등의 추가 확인이 필요합니다.",
   runner_response_invalid: "완료된 구조화 응답을 확인하지 못했습니다. 이벤트 형식·완료 여부·JSON 해석 검사가 실패했습니다.",
+  unsupported_content: "자동 검토를 지원하지 않는 파일 형식·인코딩·서브모듈 변경이 포함되어 있습니다.",
+  no_reviewable_text: "검토할 코드·텍스트 파일이 없습니다. 이미지 내용은 자동 검토하지 않습니다.",
   review_result_invalid: "리뷰 결과의 최상위 JSON 구조가 요구 형식과 다릅니다.",
   review_body_invalid: "리뷰 본문이 공개 가능한 내용과 길이 규칙을 충족하지 못했습니다.",
   review_sections_invalid: "리뷰 본문의 필수 섹션·판정·지적 분류가 요구 형식과 다릅니다.",

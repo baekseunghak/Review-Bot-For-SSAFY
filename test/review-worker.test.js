@@ -207,6 +207,23 @@ test("MR 설명의 SHA-256은 Jira 후보에서 제외하고 실제 이슈와 �
   assert.deepEqual(f.events, ["review", "comment", "notification"]);
 });
 
+test("이미지만 있는 MR은 검토할 텍스트가 없음을 기록하고 자동 재시도·게시를 멈춘다", async (t) => {
+  const f = fixture(t);
+  f.gitlab.readReview = async () => { throw Object.assign(new Error("No reviewable text"), { code: "no_reviewable_text" }); };
+  f.send();
+  const worker = f.makeWorker();
+  assert.deepEqual(await worker.runOnce(), { status: "failed", requestId: 1, code: "no_reviewable_text" });
+  const status = f.inbox.workerStatus().jobs[0];
+  assert.equal(status.status, "failed");
+  assert.equal(status.attempt, 1);
+  assert.match(status.lastErrorMessage, /검토할 코드·텍스트 파일이 없습니다/);
+  f.advance(1_000_000);
+  assert.deepEqual(await worker.runOnce(), { status: "idle" });
+  assert.equal(f.calls.reviews.length, 0);
+  assert.equal(f.notes.length, 0);
+  assert.equal(f.calls.notifications.length, 0);
+});
+
 test("다음 커밋 자동 리뷰는 이전 구현 기록을 다시 참고하며 새 기록을 누적한다", async (t) => {
   const f = fixture(t);
   f.send();
