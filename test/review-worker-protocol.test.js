@@ -27,7 +27,7 @@ async function installWorkerFixture() {
   const sha = "a".repeat(40);
   const baseSha = "c".repeat(40);
   const mrUrl = "https://gitlab.example.test/team/repo/-/merge_requests/7";
-  const effects = { modelCalls: 0, commentPosts: 0, mmPosts: 0, unexpected: [], notes: [] };
+  const effects = { modelCalls: 0, commentPosts: 0, mmPosts: 0, rawDiffReads: 0, unexpected: [], notes: [] };
   const save = () => writeFileSync(effectsPath, JSON.stringify(effects));
   const unexpected = (what) => { effects.unexpected.push(what); save(); throw new Error("Unexpected fixture operation"); };
   save();
@@ -44,13 +44,18 @@ async function installWorkerFixture() {
     if (endpoint === "user" && method === "GET") return { id: 999, username: "reviewbot" };
     if (["projects/10/merge_requests/7", "projects/team%2Frepo/merge_requests/7"].includes(endpoint) && method === "GET") return mr;
     if (endpoint.startsWith("projects/10/merge_requests/7/notes?") && method === "GET") return effects.notes;
-    if (endpoint.startsWith("projects/10/merge_requests/7/diffs?") && method === "GET") return [{
+    if ((endpoint.startsWith("projects/10/merge_requests/7/diffs?")
+      || endpoint === "projects/10/merge_requests/7/changes?access_raw_diffs=true") && method === "GET") {
+      const diffs = [{
       old_path: "src/input.js", new_path: "src/input.js", diff: "@@ -1 +1,2 @@\n+if (!input) throw new Error('empty');\n process(input);",
       new_file: false, deleted_file: false, renamed_file: false, a_mode: "100644", b_mode: "100644",
     }, {
       old_path: "docs/screen.png", new_path: "docs/screen.png", diff: "",
       new_file: true, deleted_file: false, renamed_file: false, a_mode: "0", b_mode: "100644",
-    }];
+      }];
+      if (endpoint.includes("/changes?")) { effects.rawDiffReads++; save(); return { ...mr, overflow: false, changes: diffs }; }
+      return diffs.map((diff, index) => index === 0 ? { ...diff, collapsed: true, diff: "" } : diff);
+    }
     if (endpoint.startsWith("projects/10/repository/files/src%2Finput.js?ref=") && method === "GET") {
       const ref = endpoint.split("?ref=")[1];
       if (![sha, baseSha].includes(ref)) return unexpected("File ref");
@@ -244,6 +249,7 @@ for (const provider of ["claude", "codex"]) test(`authenticated webhook drives t
     assert.equal(status.data.counts.completed, 1, JSON.stringify(status.data));
     const effects = JSON.parse(readFileSync(effectsPath, "utf8"));
     assert.deepEqual([effects.modelCalls, effects.commentPosts, effects.mmPosts], [1, 1, 1]);
+    assert.equal(effects.rawDiffReads, 1);
     assert.deepEqual(effects.unexpected, []);
     assert.deepEqual(effects.modelEvidence, { headSha: SHA, perspectives: 1, jiraKeys: ["TEST-1"] });
     assert.equal(effects.notification.channel, "@fixture.mm");

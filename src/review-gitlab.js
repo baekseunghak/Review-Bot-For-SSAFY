@@ -179,9 +179,36 @@ export class GitlabReviewClient {
         notes.push(normalized);
       }
     } });
-    const diffs = await this.pages(`${endpoint}/diffs`, { onPage: (items) => consume(items) });
+    let diffs = await this.pages(`${endpoint}/diffs`, { onPage: (items) => consume(items) });
     if (!/^\d+$/.test(String(mr.changes_count ?? "")) || Number(mr.changes_count) !== diffs.length || !diffs.length) {
       fail("incomplete_context", "GitLab did not provide a complete, nonempty MR file list.");
+    }
+    if (diffs.some((diff) => diff?.too_large)) {
+      fail("incomplete_context", "GitLab omitted a changed file diff. Automatic review cannot use partial context.");
+    }
+    if (diffs.some((diff) => diff?.collapsed === true)) {
+      // Gitaly can supply diffs hidden by the database-backed display limits.
+      const raw = await this.api(`${endpoint}/changes?access_raw_diffs=true`);
+      this.assertReady(this.snapshot(raw, input), snapshot.headSha);
+      if (typeof raw.diff_refs?.base_sha !== "string" || typeof raw.diff_refs?.start_sha !== "string"
+        || raw.diff_refs.base_sha.toLowerCase() !== baseSha.toLowerCase()
+        || raw.diff_refs?.start_sha?.toLowerCase() !== startSha.toLowerCase()
+        || raw.overflow !== false || !Array.isArray(raw.changes) || raw.changes.length !== diffs.length) {
+        fail("incomplete_context", "GitLab raw diffs did not match the complete revision.");
+      }
+      const identity = (diff) => JSON.stringify([diff?.old_path, diff?.new_path]);
+      const byPath = new Map(raw.changes.map((diff) => [identity(diff), diff]));
+      const fields = ["old_path", "new_path", "a_mode", "b_mode", "new_file", "deleted_file", "renamed_file"];
+      if (byPath.size !== diffs.length) fail("incomplete_context", "GitLab raw diffs contain duplicate files.");
+      diffs = diffs.map((diff) => {
+        const expanded = byPath.get(identity(diff));
+        if (!expanded || fields.some((key) => expanded[key] !== diff?.[key])) {
+          fail("incomplete_context", "GitLab raw diff file identities did not match.");
+        }
+        if (!diff.collapsed) return diff;
+        consume(expanded);
+        return expanded;
+      });
     }
     const seen = new Set();
     const files = [];

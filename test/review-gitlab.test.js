@@ -149,6 +149,52 @@ test("diff와 댓글은 다음 페이지까지 빠짐없이 조회한다", async
   assert.ok(calls.some((call) => call.endpoint.includes("/notes?") && call.endpoint.endsWith("page=2")));
 });
 
+test("접힌 diff는 같은 커밋·전체 파일 목록의 원본 diff로 복구하고 일반 요청은 추가 조회하지 않는다", async () => {
+  const changedFiles = [diff({ diff: "", collapsed: true }), diff({ old_path: "src/other.js", new_path: "src/other.js" })];
+  const metadata = mr({ changes_count: "2" });
+  const rawFiles = changedFiles.map((file) => ({ ...file, collapsed: false, diff: diff().diff }));
+  const { client, calls } = fixture({ metadata, diffs: changedFiles, intercept: ({ endpoint }) =>
+    endpoint.endsWith("/changes?access_raw_diffs=true") ? { ...metadata, overflow: false, changes: rawFiles } : undefined });
+  const result = await client.readReview(input);
+  assert.equal(result.files.length, 2);
+  assert.equal(result.files[0].diff, diff().diff);
+  assert.equal(calls.filter((call) => call.endpoint.endsWith("/changes?access_raw_diffs=true")).length, 1);
+  const ordinary = fixture();
+  await ordinary.client.readReview(input);
+  assert.equal(ordinary.calls.some((call) => call.endpoint.includes("/changes?")), false);
+});
+
+test("원본 diff의 불완전·초과·다른 커밋·파일·모드·수집 중 변경은 복구 성공으로 처리하지 않는다", async () => {
+  const original = diff({ collapsed: true, diff: "" });
+  const raw = () => ({ ...mr(), overflow: false, changes: [diff()] });
+  for (const mutate of [
+    (r) => { r.overflow = true; }, (r) => { delete r.overflow; },
+    (r) => { r.project_id = 13; }, (r) => { r.iid = 8; },
+    (r) => { r.sha = "d".repeat(40); r.diff_refs.head_sha = r.sha; },
+    (r) => { r.diff_refs.base_sha = "d".repeat(40); }, (r) => { r.diff_refs.start_sha = "d".repeat(40); },
+    (r) => { r.changes = []; }, (r) => { r.changes = null; },
+    (r) => { r.changes[0].new_path = "src/unknown.js"; }, (r) => { r.changes[0].b_mode = "100755"; },
+    (r) => { r.changes[0].new_file = true; }, (r) => { r.changes[0].collapsed = true; },
+    (r) => { r.changes[0].too_large = true; }, (r) => { r.changes[0].diff = ""; },
+    (r) => { r.changes[0].diff = null; },
+  ]) {
+    const response = raw(); mutate(response);
+    await assert.rejects(fixture({ diffs: [original], intercept: ({ endpoint }) =>
+      endpoint.endsWith("/changes?access_raw_diffs=true") ? response : undefined }).client.readReview(input));
+  }
+  const duplicate = fixture({ metadata: mr({ changes_count: "2" }), diffs: [original, diff({ new_path: "src/other.js" })],
+    intercept: ({ endpoint }) => endpoint.endsWith("/changes?access_raw_diffs=true")
+      ? { ...mr(), overflow: false, changes: [diff(), diff()] } : undefined });
+  await assert.rejects(duplicate.client.readReview(input), { code: "incomplete_context" });
+  const changed = fixture({ diffs: [original], metadata: (reads) => reads > 1 ? mr({ state: "merged" }) : mr(),
+    intercept: ({ endpoint }) => endpoint.endsWith("/changes?access_raw_diffs=true") ? raw() : undefined });
+  await assert.rejects(changed.client.readReview(input), { code: "review_not_open" });
+  const large = fixture({ diffs: [original], intercept: ({ endpoint }) => endpoint.endsWith("/changes?access_raw_diffs=true")
+    ? { ...raw(), changes: [diff({ diff: "x".repeat(2000) })] } : undefined });
+  await assert.rejects(new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: large.runImpl, maxContextBytes: 1024 })
+    .readReview(input), { code: "context_too_large" });
+});
+
 test("서버가 일부 diff만 주거나 경로·인코딩·내용이 불완전하면 리뷰를 중단한다", async () => {
   for (const setting of [
     { metadata: mr({ changes_count: "2" }) }, { metadata: mr({ changes_count: "1+" }) },
@@ -267,7 +313,10 @@ test("이미지 제외는 전체 diff·크기·checksum·최종 head 검증이�
   await assert.rejects(fixture(onlyImage).client.readReview(input), { code: "no_reviewable_text" });
   await assert.rejects(fixture({ ...onlyImage, metadata: (reads) => reads === 1 ? mr() : mr({ sha: baseSha, diff_refs: { ...mr().diff_refs, head_sha: baseSha } }) })
     .client.readReview(input), { code: "stale_head" });
-  await assert.rejects(fixture({ ...onlyImage, diffs: [imageDiff("screen.png", { collapsed: true })] }).client.readReview(input), { code: "incomplete_context" });
+  await assert.rejects(fixture({ ...onlyImage, diffs: [imageDiff("screen.png", { collapsed: true })],
+    intercept: ({ endpoint }) => endpoint.endsWith("/changes?access_raw_diffs=true")
+      ? { ...mr(), overflow: false, changes: [imageDiff("screen.png", { collapsed: true })] } : undefined })
+    .client.readReview(input), { code: "incomplete_context" });
   for (const invalid of [{ size: png.length + 1 }, { content_sha256: "0".repeat(64) }]) {
     await assert.rejects(fixture({ ...onlyImage, intercept: ({ endpoint }) => endpoint.includes("/repository/files/")
       ? { file_path: "screen.png", encoding: "base64", content: png.toString("base64"), ...invalid } : undefined })

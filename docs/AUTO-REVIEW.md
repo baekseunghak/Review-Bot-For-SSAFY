@@ -242,6 +242,7 @@ MCP `review_worker_status`:
 ## 8. 자료 범위와 한계
 
 - 모든 변경 파일 목록과 diff의 누락 여부를 확인하고, 코드·텍스트 파일의 base/head 내용을 읽습니다. 페이지 상한·자료 크기 제한·생략 diff·지원하지 않는 바이너리·submodule·UTF-8이 아닌 텍스트 변경은 부분 검토를 성공 처리하지 않습니다.
+- GitLab이 파일 diff를 `collapsed=true`로 접으면 `/changes?access_raw_diffs=true`로 원본 diff를 한 번 조회해 해당 파일을 복구합니다. 원래 목록의 모든 파일 경로·변경 종류·모드와 MR·head/base/start SHA가 일치하고 `overflow=false`일 때만 사용하며, 복구된 diff도 기존 자료 크기 제한과 최종 head 확인을 거칩니다. `too_large=true`이거나 복구 후에도 접힘·누락·불일치가 있으면 중단합니다. 이 대체 경로는 [GitLab REST API v4의 원본 변경 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-merge-request-changes)를 사용합니다. 해당 경로는 API v5에서 제거 예정이므로 향후 API 전환 시 교체가 필요하며, 일반 `/diffs` 응답이 완전하면 호출하지 않습니다.
 - JPEG(`.jpg`, `.jpeg`)·PNG·GIF·WebP·ICO는 확장자와 바이너리 헤더가 일치하면 `excludedImages`로 분리합니다. 경로·변경 종류·base/head 크기·SHA-256·형식만 전달하고 이미지 바이트·Base64는 리뷰 입력에서 제외합니다. 이미지는 메타데이터만 전체 자료 한도에 포함하지만 기존 파일당 크기 제한은 유지합니다. 단순히 확장자를 바꾼 파일·확장자와 헤더 불일치·이미지와 텍스트 간 전환은 제외로 우회하지 않습니다. SVG는 UTF-8 XML 코드로 검토하며 렌더링하지 않습니다.
 - 이미지와 코드·문서가 함께 있으면 텍스트 변경의 리뷰·기록·댓글·알림을 진행합니다. 댓글의 `확인한 범위`에 이미지 미검토 건수를 실행기가 자동으로 추가합니다. 이미지의 내용·외관을 확인한 것으로 쓰거나 이미지 경로를 읽은 코드 근거로 기록하지 않습니다. 이미지뿐인 MR은 `no_reviewable_text`로 종료하며, 승인 댓글이나 완료 알림을 만들지 않습니다. 이미지 내용을 검토하려면 별도의 시각 검토가 필요합니다.
 - GitLab 자료 기본 한도는 1,000,000 UTF-8 bytes입니다. CLI 입력은 최신 팀 맥락까지 포함해 최대 2MiB, stdout/stderr는 각각 최대 200,000 bytes, 기본 실행 제한은 180초입니다. Jira 자체의 이슈·이력·설명 한도는 [팀 작업 맥락](TEAM-CONTEXT.md)의 생략 표시를 유지합니다.
