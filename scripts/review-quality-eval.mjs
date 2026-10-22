@@ -27,7 +27,7 @@ export function validateFixtures(fixtures) {
     assert.match(changes.mrUrl, /^https:\/\/gitlab\.example\.test\//);
     assert.deepEqual(changes.issueKeys, ["TEST-1"]);
     assert.ok(Array.isArray(changes.files) && changes.files.length > 0);
-    for (const finding of entry.expected.findings) {
+    for (const finding of [...entry.expected.findings, ...(entry.expected.resolvedFindings ?? [])]) {
       const file = changes.files.find(item => item.newPath === finding.path);
       assert.ok(file);
       assert.ok(finding.lineRange.length === 2 && finding.lineRange.every(Number.isSafeInteger));
@@ -57,18 +57,22 @@ function hasUnsupportedClaim(body) {
 
 export function scoreReview(entry, review) {
   const blocks = confirmedFindingBlocks(review.body);
-  const detectedTargets = entry.expected.findings.filter(finding => blocks.some(block =>
+  const matches = finding => blocks.some(block =>
     finding.anyTerms.some(term => block.includes(term)) && citedLocations(block).some(location => {
       const match = /^(.*):(\d+)$/.exec(location);
       return match && match[1] === finding.path && Number(match[2]) >= finding.lineRange[0]
         && Number(match[2]) <= finding.lineRange[1];
-    }))).map(finding => finding.id);
+    }));
+  const detectedTargets = entry.expected.findings.filter(matches).map(finding => finding.id);
+  const repeatedResolvedTargets = (entry.expected.resolvedFindings ?? []).filter(matches).map(finding => finding.id);
   const unsupportedClaim = Boolean(entry.expected.noConfirmedUnsupportedClaims && hasUnsupportedClaim(review.body));
+  const comparisonMissing = Boolean(entry.expected.previousReviewComparison
+    && !/^### 이전 리뷰 대비\s*\r?\n\s*\S/m.test(review.body));
   return {
     case: entry.id, verdict: review.verdict, expectedVerdict: entry.expected.verdict,
-    detectedTargets, expectedTargetCount: entry.expected.findings.length, unsupportedClaim,
+    detectedTargets, expectedTargetCount: entry.expected.findings.length, repeatedResolvedTargets, unsupportedClaim, comparisonMissing,
     passed: review.verdict === entry.expected.verdict
-      && detectedTargets.length === entry.expected.findings.length && !unsupportedClaim,
+      && detectedTargets.length === entry.expected.findings.length && !repeatedResolvedTargets.length && !unsupportedClaim && !comparisonMissing,
   };
 }
 
@@ -79,7 +83,7 @@ async function main() {
     help: { type: "boolean", default: false },
   } });
   if (values.help) {
-    process.stdout.write("Usage: node --env-file=.env scripts/review-quality-eval.mjs [--run] [--case broken|fixed|insufficient]\nWithout --run, only synthetic fixtures are checked. --run uses the configured CLI and model allowance. No MR, chat, or review-memory writes occur.\n");
+    process.stdout.write("Usage: node --env-file=.env scripts/review-quality-eval.mjs [--run] [--case CASE_ID]\nWithout --run, only synthetic fixtures are checked. --run uses the configured CLI and model allowance. No MR, chat, or review-memory writes occur.\n");
     return;
   }
   const fixtures = validateFixtures(JSON.parse(await readFile(fixtureUrl, "utf8")));
@@ -98,9 +102,10 @@ async function main() {
     try {
       report = scoreReview(entry, await runner.review(entry.input));
       assert.equal(report.passed, true, `Quality expectations failed for ${entry.id}.`);
-    } catch {
+    } catch (error) {
       failures += 1;
-      report ??= { case: entry.id, passed: false, error: "runner_failed_or_review_rejected" };
+      report ??= { case: entry.id, passed: false, error: /^[a-z][a-z0-9_]{0,63}$/.test(error?.code ?? "")
+        ? error.code : "runner_failed_or_review_rejected" };
     }
     process.stdout.write(`${JSON.stringify(report)}\n`);
   }

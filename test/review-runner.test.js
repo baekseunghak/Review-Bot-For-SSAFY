@@ -205,6 +205,22 @@ test("확인된 보류 지적은 실제 수집 파일과 해당 base/head 코드
   assert.deepEqual(normalizeReviewResult(old, { context, changes: renamed }), old);
 });
 
+test("지적 설명의 점 표기 식은 파일 인용으로 오인하지 않고 실제 파일 근거는 유지한다", () => {
+  const changes = { files: [{ oldPath: "src/input.js", newPath: "src/input.js", baseContent: null,
+    headContent: Array(10).fill("const value = input.value;").join("\n") }] };
+  const value = holdReview();
+  value.body = value.body.replace("빈 입력을 거부하지 않아", "`input.value`와 `evidence.length`의 빈 입력을 거부하지 않아");
+  assert.deepEqual(normalizeReviewResult(value, { context, changes }), value);
+  for (const replacement of ["`input.value`", "`missing.js:10`", "`src/missing.js`", "`src/input.js:11`", "`src/input.js:0`"]) {
+    const invalid = structuredClone(value);
+    invalid.body = invalid.body.replace("`src/input.js:10`", replacement);
+    assert.throws(() => normalizeReviewResult(invalid, { context, changes }), { code: "review_locations_invalid" });
+  }
+  const additionalUnknown = structuredClone(value);
+  additionalUnknown.body = additionalUnknown.body.replace("빈 입력을", "`src/missing.js`의 빈 입력을");
+  assert.throws(() => normalizeReviewResult(additionalUnknown, { context, changes }), { code: "review_locations_invalid" });
+});
+
 test("텍스트와 이미지가 함께 바뀐 승인은 물론 보류에도 이미지 미검토 범위를 한 번만 공개한다", async () => {
   const changes = {
     files: [{ oldPath: "src/input.js", newPath: "src/input.js", baseContent: "\n".repeat(10), headContent: "\n".repeat(10) }],
