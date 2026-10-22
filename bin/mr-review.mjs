@@ -41,6 +41,11 @@ export const SEVERE = "[위험]";
 const SEVERE_TAGS = [SEVERE, "[높음]"];
 export const UNVERIFIED = "[확인 필요]";
 
+// P2 같은 식별자가 코드 설명에 등장하는 경우와 지적의 등급 표기를 구분한다.
+export function hasPriorityNotation(body) {
+  return /^\s*(?:#{1,6}\s+|[-*]\s+|\d+[.)]\s+)?(?:\*\*)?\[P[0-3]\]/mi.test(String(body));
+}
+
 // 제목 다음 제목(## 또는 ###)까지의 본문을 돌려준다. 없으면 빈 문자열.
 function sectionOf(body, title) {
   const text = String(body);
@@ -60,6 +65,7 @@ export function verdictProblems(verdict, body) {
   const lines = String(body).split(/\r?\n/);
   const confirmed = (line) => !line.includes(UNVERIFIED);
   const problems = [];
+  if (hasPriorityNotation(body)) problems.push("결함 등급은 [위험]·[주의]·[미미]로 표시하세요. P0~P3 표기는 게시할 수 없습니다.");
 
   const unverified = lines.filter((line) => line.includes(UNVERIFIED)).length;
   const heading = `## 리뷰 결과: ${verdict === "hold" ? "보류" : "승인"}`;

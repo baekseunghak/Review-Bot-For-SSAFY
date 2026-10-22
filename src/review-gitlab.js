@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { UserError } from "./core.js";
 import { canonicalMrUrl, extractIssueKeys, parseGitlabMrUrl } from "./gitlab-context.js";
+import { hasPriorityNotation } from "../bin/mr-review.mjs";
 
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 const PAGE_SIZE = 100;
@@ -313,6 +314,7 @@ export class GitlabReviewClient {
       fail("invalid_input", "Review comment body or commit SHA is invalid.");
     }
     if (/^\s*\/[A-Za-z][A-Za-z_-]*(?:\s|$)/m.test(body)) fail("unsafe_comment", "Review comments cannot contain GitLab quick action commands.");
+    if (hasPriorityNotation(body)) fail("review_severity_invalid", "Review findings must use 위험, 주의 or 미미 instead of P0-P3.");
     const marker = reviewCommentMarker({ host: this.host, projectId, mrIid, headSha });
     if (body.includes("<!-- reviewbot:")) fail("invalid_input", "Review comment body cannot supply an internal marker.");
     const user = await this.authenticatedUser();

@@ -434,6 +434,18 @@ test("게시 직전 lease 상실·새 커밋·닫힌 MR이면 쓰기를 실행�
   }
 });
 
+test("댓글 게시 경로는 우선순위 약어를 거부하고 코드 식별자와 한국어 등급은 허용한다", async () => {
+  for (const body of ["### [P2] 가입 실패", "- [P1] [안전] 권한 우회", "1. **[P3]** 문구 오류", "[P0] 데이터 손실"]) {
+    const { client, calls } = fixture();
+    await assert.rejects(client.ensureComment({ ...input, headSha, body }), { code: "review_severity_invalid" });
+    assert.equal(calls.length, 0, "검증 실패 시 외부 요청하지 않는다");
+  }
+  for (const body of ["### [주의] 가입 실패", "- [위험] [안전] 권한 우회", "- [미미] 문구 오류", "코드의 `P2`와 `[P2]` 값은 입력 식별자입니다."]) {
+    const { client } = fixture();
+    assert.equal((await client.ensureComment({ ...input, headSha, body })).created, true);
+  }
+});
+
 test("리뷰 본문은 GitLab quick action이나 내부 marker를 삽입할 수 없다", async () => {
   for (const body of ["review\n/merge", "review\n  /approve", "review\n\t/assign @someone", "<!-- reviewbot:fake -->", "bad\0body"]) {
     const { client, calls } = fixture();
