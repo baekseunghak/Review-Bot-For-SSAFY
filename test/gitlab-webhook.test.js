@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { createWebhookServer } from "../bin/gitlab-webhook.mjs";
 import { reviewSettings } from "../src/review-config.js";
+import { ReviewInbox } from "../src/review-inbox.js";
+import { reviewCommentMarker } from "../src/review-gitlab.js";
 
 const secret = "local-test-only-secret-123456789";
 
@@ -48,6 +53,43 @@ test("authenticated JSON passes only the expected event fields", async () => {
     assert.equal((await fetch(`${url}/webhooks/gitlab`)).status, 405);
     assert.equal((await fetch(`${url}/unknown`)).status, 404);
   });
+});
+
+test("authenticated self-mentions queue once while posted review webhooks cannot start a loop", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "review-self-mention-"));
+  const inbox = new ReviewInbox({ dataDir, username: "reviewer", userId: 42, botUserId: 42, projectIds: [100] });
+  const server = createWebhookServer({ inbox, secret });
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const headSha = "a".repeat(40);
+  const payload = {
+    object_kind: "note", project: { id: 100 }, user: { id: 42 },
+    object_attributes: { id: 1, author_id: 42, noteable_type: "MergeRequest", action: "create", note: "@reviewer please review" },
+    merge_request: { iid: 7, author_id: 42, state: "opened", description: "", last_commit: { id: headSha } },
+  };
+  const deliver = (eventId) => post(url, JSON.stringify(payload), { "X-Gitlab-Event": "Note Hook", "X-Gitlab-Event-UUID": eventId });
+  try {
+    assert.equal((await (await deliver("human-note")).json()).status, "queued");
+    assert.equal((await deliver("human-note")).status, 200);
+    const job = inbox.claimNext();
+    payload.object_attributes.note = `@reviewer review result\n\n${reviewCommentMarker({ host: "gitlab.example.test", projectId: 100, mrIid: 7, headSha })}`;
+    payload.object_attributes.id = 2;
+    for (const action of ["create", "update"]) {
+      payload.object_attributes.action = action;
+      assert.deepEqual(await (await deliver(`bot-note-${action}`)).json(), { status: "ignored", reason: "own_comment" });
+    }
+    inbox.finish(job.id, job.leaseToken);
+    payload.object_attributes.note = "@reviewer please review again";
+    payload.object_attributes.id = 3;
+    await deliver("another-human-note");
+    assert.equal(inbox.claimNext(), null);
+    assert.equal(inbox.status().pending, 0);
+    assert.equal(inbox.workerStatus().counts.completed, 1);
+  } finally {
+    await new Promise((done) => server.close(done));
+    inbox.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("malformed JSON and wrong media types are rejected", async () => {

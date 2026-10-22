@@ -194,7 +194,7 @@ macOS·Linux에서는 데이터 경로를 `/home/you/.reviewbot/team-a`처럼 �
 | `REVIEWBOT_JIRA_PROJECT_KEY` | Jira 사용 | `TEAM` 같은 프로젝트 키. 기본값 없음 |
 | `REVIEWBOT_GITLAB_USERNAME` | 설명·댓글 멘션 수신 | 감지할 계정의 사용자명, `@` 제외 |
 | `REVIEWBOT_GITLAB_USER_ID` | 리뷰어 지정 수신 권장 | 같은 계정의 숫자 사용자 ID |
-| `REVIEWBOT_GITLAB_BOT_USER_ID` | 선택 | 자체 댓글을 무시할 게시 계정 ID. 게시 계정이 감지 계정과 같으면 같은 값 |
+| `REVIEWBOT_GITLAB_BOT_USER_ID` | 선택 | 게시 계정 ID. 별도 봇 계정은 모든 댓글을 제외하며, 감지 계정 ID와 같으면 리뷰 식별 표시가 붙은 댓글만 제외 |
 | `REVIEWBOT_GITLAB_PROJECT_IDS` | 웹훅 수신 | 허용할 GitLab 숫자 프로젝트 ID를 쉼표로 구분. 비우면 수신 비활성 |
 | `REVIEWBOT_WEBHOOK_SECRET` | 웹훅 수신 | GitLab Secret token과 동일한 16~512자 공백 없는 ASCII 문자열 |
 | `REVIEWBOT_PORT` | 선택 | 로컬 수신 포트. 기본 `8765` |
@@ -559,6 +559,8 @@ https://reviewbot.example.com/webhooks/gitlab
 3. 해당 계정을 리뷰어로 지정합니다.
 
 최초 추적된 열린 MR은 이후 새 커밋 이벤트로 요청을 갱신합니다. Draft는 보류하고 닫힘·머지는 대기 요청을 취소합니다. 코드 블록·인용·이메일·URL 속 멘션은 제외합니다. 봇 자신의 댓글 제외는 `REVIEWBOT_GITLAB_BOT_USER_ID`를 설정했을 때 적용됩니다. 같은 이벤트를 다시 보내도 중복 요청은 생기지 않습니다. 웹훅이 누락되면 현재 5분 폴링으로 보충되지는 않습니다.
+
+개인 계정을 감지·게시에 함께 사용한다면 `REVIEWBOT_GITLAB_USER_ID`와 `REVIEWBOT_GITLAB_BOT_USER_ID`를 같은 ID로 설정하세요. 본인 MR의 댓글에 직접 `@자신의사용자명`을 쓰면 리뷰 요청으로 받습니다. 봇이 게시한 댓글에는 `<!-- reviewbot:... -->` 식별 표시가 붙으며, 같은 계정의 이 표시가 있는 댓글은 생성·수정 모두 무시합니다. 이 표시를 삭제하지 마세요. 이미 리뷰가 완료된 같은 커밋은 다시 실행하지 않으며, 이후 새 커밋이 올라오면 자동으로 검토합니다. 감지 계정과 별도인 봇 게시 계정의 댓글은 기존처럼 모두 제외합니다.
 
 | 응답 코드 | 의미 |
 |---|---|

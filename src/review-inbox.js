@@ -135,7 +135,12 @@ function normalize(eventType, payload, target) {
     const authorId = attrs.author_id ?? payload.user?.id;
     if (authorId !== undefined && authorId !== null) id(authorId);
     if (target.botUserId !== null && (authorId === undefined || authorId === null)) invalid();
-    if (target.botUserId !== null && authorId === target.botUserId) return { ignored: "own_comment" };
+    if (typeof attrs.note !== "string") invalid();
+    // A shared posting account also writes human requests; published reviews carry this reserved marker.
+    if (target.botUserId !== null && authorId === target.botUserId
+      && (target.botUserId !== target.userId || attrs.note.includes("<!-- reviewbot:"))) {
+      return { ignored: "own_comment" };
+    }
   }
   const mr = isNote ? object(payload.merge_request) : attrs;
   const project = payload.project === undefined ? undefined : object(payload.project);
@@ -149,7 +154,6 @@ function normalize(eventType, payload, target) {
   if (mr.work_in_progress !== undefined && typeof mr.work_in_progress !== "boolean") invalid();
   if (mr.last_commit !== undefined && mr.last_commit !== null) object(mr.last_commit);
   const description = text(mr.description);
-  if (isNote && typeof attrs.note !== "string") invalid();
   const reasons = [];
   if (mentioned(description, target.username)) reasons.push("description_mention");
   if (isNote && mentioned(attrs.note, target.username)) reasons.push("comment_mention");

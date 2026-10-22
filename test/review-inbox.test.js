@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { UserError } from "../src/core.js";
 import { ReviewInbox } from "../src/review-inbox.js";
+import { reviewCommentMarker } from "../src/review-gitlab.js";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -218,6 +219,39 @@ test("the bot's own notes are ignored without dropping human requests", (t) => {
   assert.deepEqual(send(instance, note("@reviewer", { author_id: 99 })), { status: "ignored", reason: "own_comment" });
   assert.equal(instance.status().events, 0);
   assert.equal(send(instance, note()).status, "queued");
+});
+
+test("a shared posting account accepts human self-mentions but ignores its marked reviews", (t) => {
+  const { instance } = inbox(t, { botUserId: 30 });
+  const marker = reviewCommentMarker({ host: "gitlab.example.test", projectId: 10, mrIid: 7, headSha: A });
+  const ownNote = (body, attrs = {}, mrAttrs = {}) => ({
+    ...note(body, { author_id: 30, ...attrs }, { author_id: 30, ...mrAttrs }), user: { id: 30 },
+  });
+  for (const action of ["create", "update"]) {
+    assert.deepEqual(send(instance, ownNote(`@reviewer review result\n\n${marker}`, { action }, {
+      description: "@reviewer", reviewer_ids: [30], last_commit: { id: B }, updated_at: T2,
+    })), { status: "ignored", reason: "own_comment" });
+  }
+  assert.equal(instance.status().events, 0);
+  assert.equal(instance.status().tracked, 0);
+  assert.equal(send(instance, ownNote("@reviewer please review")).status, "queued");
+  assert.deepEqual(instance.listPending()[0].reasons, ["comment_mention"]);
+  assert.equal(send(instance, ownNote(`@reviewer\n${marker}`, { action: "update" }, {
+    last_commit: { id: B }, updated_at: T2,
+  })).reason, "own_comment");
+  assert.equal(instance.listPending()[0].headSha, A);
+  const job = instance.claimNext();
+  instance.finish(job.id, job.leaseToken);
+  send(instance, ownNote("@reviewer please review again", { id: 91, author_id: undefined }));
+  assert.equal(instance.claimNext(), null);
+  send(instance, mr({ last_commit: { id: B }, updated_at: T2 }));
+  assert.equal(instance.claimNext().headSha, B);
+});
+
+test("a copied review marker from another author does not suppress a human request", (t) => {
+  const { instance } = inbox(t, { botUserId: 30 });
+  const marker = reviewCommentMarker({ host: "gitlab.example.test", projectId: 10, mrIid: 7, headSha: A });
+  assert.equal(send(instance, note(`> ${marker}\n\n@reviewer please review`)).status, "queued");
 });
 
 test("project allowlists fail closed and unsupported events or issue notes are ignored", (t) => {
