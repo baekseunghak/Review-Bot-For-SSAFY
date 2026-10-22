@@ -36,7 +36,9 @@ export function citedLocations(body) {
 }
 
 // 심각도와 미확인 표시. 태그는 지적 항목의 첫 줄에만 붙인다(확인한 범위에는 쓰지 않는다).
-export const SEVERE = "[높음]";
+export const SEVERE = "[위험]";
+// 저장된 이전 리뷰도 게시·알림 재개 시 같은 기준으로 검증한다.
+const SEVERE_TAGS = [SEVERE, "[높음]"];
 export const UNVERIFIED = "[확인 필요]";
 
 // 제목 다음 제목(## 또는 ###)까지의 본문을 돌려준다. 없으면 빈 문자열.
@@ -52,7 +54,7 @@ function sectionOf(body, title) {
 // 판정이 지적과 맞는지 본다. 지적을 지우는 기준(반증)과 판정 기준은 다르다 —
 // 확인하지 못한 지적은 지우지 않고 남기되, 판정은 확인된 것으로만 한다.
 //  - 확인하지 못한 지적 수를 제목에 드러낸다: "## 리뷰 결과: 승인 (미확인 2건)"
-//  - 확인된 [높음]이 있으면 승인할 수 없다
+//  - 확인된 [위험](이전 [높음] 포함)이 있으면 승인할 수 없다
 //  - 보류는 확인된 사유(카테고리 태그와 코드 위치가 같은 줄, [확인 필요] 아님)가 하나는 있어야 한다
 export function verdictProblems(verdict, body) {
   const lines = String(body).split(/\r?\n/);
@@ -69,7 +71,7 @@ export function verdictProblems(verdict, body) {
   }
 
   if (verdict === "approve") {
-    const severe = lines.filter((line) => line.includes(SEVERE) && confirmed(line));
+    const severe = lines.filter((line) => SEVERE_TAGS.some((tag) => line.includes(tag)) && confirmed(line));
     if (severe.length) {
       problems.push(`확인된 ${SEVERE} 지적이 있으면 승인할 수 없습니다. 보류하거나, 확인하지 못했다면 ${UNVERIFIED} 를 붙이세요:\n`
         + severe.map((line) => `  ${line.trim()}`).join("\n"));
@@ -78,6 +80,7 @@ export function verdictProblems(verdict, body) {
 
   if (verdict === "hold") {
     const reasons = sectionOf(body, "### 수정이 필요한 부분").split(/\r?\n/).filter((line) => confirmed(line)
+      && !line.includes("[미미]")
       && HOLD_CATEGORIES.some((category) => line.includes(category))
       && citedLocations(line).length > 0);
     if (!reasons.length) {
@@ -85,6 +88,10 @@ export function verdictProblems(verdict, body) {
         + `${UNVERIFIED} 가 아니어야 합니다. 확인하지 못한 것으로는 병합을 막지 않습니다 — 확인하거나 승인하세요.`);
     }
   }
+  const ambiguous = lines.filter((line) => /^\s*(?:[-*]|\d+[.)])\s/.test(line)
+    && HOLD_CATEGORIES.some((category) => line.includes(category))
+    && ["[위험]", "[주의]", "[미미]"].filter((tag) => line.includes(tag)).length > 1);
+  if (ambiguous.length) problems.push("각 지적에는 위험·주의·미미 중 한 단계만 붙이세요.");
   return problems;
 }
 

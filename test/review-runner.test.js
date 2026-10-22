@@ -33,6 +33,34 @@ function holdReview() {
   return result;
 }
 
+test("위험·주의·미미 등급과 판정은 구분하고 이전 저장 리뷰도 재개할 수 있다", () => {
+  assert.equal(normalizeReviewResult(holdReview(), { context }).verdict, "hold", "이전 높음 기록 유지");
+  for (const severity of ["위험", "주의"]) {
+    const result = holdReview();
+    result.body = result.body.replace("[높음]", `[${severity}]`);
+    assert.equal(normalizeReviewResult(result, { context }).verdict, "hold");
+  }
+  const minorHold = holdReview();
+  minorHold.body = minorHold.body.replace("[높음]", "[미미]");
+  assert.throws(() => normalizeReviewResult(minorHold, { context }), { code: "review_sections_invalid" });
+  for (const severity of ["위험", "주의", "미미"]) {
+    const result = review();
+    result.body += `\n\n### 비차단 결함\n- [${severity}] [정확성] \`src/input.js:10\`에서 확인한 문제`;
+    if (severity === "위험") {
+      assert.throws(() => normalizeReviewResult(result, { context }), { code: "review_sections_invalid" });
+    } else {
+      assert.equal(normalizeReviewResult(result, { context }).verdict, "approve");
+    }
+  }
+  const unknown = review();
+  unknown.body = unknown.body.replace("## 리뷰 결과: 승인", "## 리뷰 결과: 승인 (미확인 1건)");
+  unknown.body += "\n### 확인할 사항\n- [확인 필요] 호출 경로가 제공되지 않아 영향은 확인하지 못했습니다.";
+  assert.equal(normalizeReviewResult(unknown, { context }).verdict, "approve");
+  const conflicting = holdReview();
+  conflicting.body = conflicting.body.replace("[높음]", "[위험] [미미]");
+  assert.throws(() => normalizeReviewResult(conflicting, { context }), { code: "review_sections_invalid" });
+});
+
 function fakeRunner({ value = review(), raw, code = 0, stderr, hang = false, error, onInput } = {}) {
   const calls = [];
   const spawnImpl = (file, args, options) => {
