@@ -68,11 +68,15 @@ export function scoreReview(entry, review) {
   const unsupportedClaim = Boolean(entry.expected.noConfirmedUnsupportedClaims && hasUnsupportedClaim(review.body));
   const comparisonMissing = Boolean(entry.expected.previousReviewComparison
     && !/^### 이전 리뷰 대비\s*\r?\n\s*\S/m.test(review.body));
+  const unexpectedConfirmedFindings = Boolean(entry.expected.noConfirmedFindings && blocks.length);
+  const correctionMissing = Boolean(entry.expected.previousJudgmentCorrection && !/이전 판단 정정|과거 판단 정정|지적.{0,20}철회/.test(review.body));
   return {
     case: entry.id, verdict: review.verdict, expectedVerdict: entry.expected.verdict,
     detectedTargets, expectedTargetCount: entry.expected.findings.length, repeatedResolvedTargets, unsupportedClaim, comparisonMissing,
+    unexpectedConfirmedFindings, correctionMissing,
     passed: review.verdict === entry.expected.verdict
-      && detectedTargets.length === entry.expected.findings.length && !repeatedResolvedTargets.length && !unsupportedClaim && !comparisonMissing,
+      && detectedTargets.length === entry.expected.findings.length && !repeatedResolvedTargets.length && !unsupportedClaim && !comparisonMissing
+      && !unexpectedConfirmedFindings && !correctionMissing,
   };
 }
 

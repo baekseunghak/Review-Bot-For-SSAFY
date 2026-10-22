@@ -39,3 +39,19 @@ test("후속 예제는 알려진 세 결함만 수정하고 헤더 누락과 잘
   assert.match(files.find((file) => file.newPath.endsWith("mode.js")).headContent, /: 'none'/);
   assert.match(files.find((file) => file.newPath.endsWith("load.js")).headContent, /duplicate item ID/);
 });
+
+test("합의된 첫 대표값 선택은 승인하고 근거 없는 과거 지적을 정정해야 한다", () => {
+  const normal = entry("accepted-behavior");
+  const approved = { verdict: "approve", body: "## 리뷰 결과: 승인\n\n### 확인한 범위\n첫 대표값 계약과 일치합니다.\n\n### 이전 리뷰 대비\n이전 판단 정정: 모든 행의 검증을 요구한 지적은 현재 계약에 근거가 없어 철회합니다." };
+  assert.equal(scoreReview(normal, approved).passed, true);
+  assert.equal(scoreReview(normal, { ...approved, body: approved.body.replace("이전 판단 정정", "수정 없음").replace("지적은 현재 계약에 근거가 없어 철회합니다", "개선이 필요합니다") }).passed, false);
+  const unjustified = { ...approved, body: approved.body + "\n### 수정이 필요한 부분\n- [정확성] `src/import/metadata.js:3` 뒤쪽 행을 검증해야 합니다." };
+  assert.equal(scoreReview(normal, unjustified).unexpectedConfirmedFindings, true);
+  assert.equal(scoreReview(normal, unjustified).passed, false);
+});
+
+test("대표값 계약을 실제로 깨뜨린 경우에는 기준 조정 뒤에도 보류한다", () => {
+  const broken = entry("representative-regression");
+  assert.equal(scoreReview(broken, review(broken.expected.findings)).passed, true);
+  assert.equal(scoreReview(broken, { verdict: "approve", body: "문제없음" }).passed, false);
+});
