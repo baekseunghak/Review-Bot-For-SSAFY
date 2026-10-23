@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, mkdir, writeFile, lstat } from "node:fs/promises";
 import { isAbsolute, join, win32 } from "node:path";
-import { DockerReviewSandbox } from "./review-sandbox.js";
+import { DockerReviewSandbox, redactValidationLog } from "./review-sandbox.js";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const kinds = ["test", "build", "lint"];
@@ -126,7 +126,7 @@ export function verificationMarkdown(value) {
   }
   if (!value.checks.length) lines.push(`- 격리 실행: **미실행** (${value.configuration}). 프로젝트별 검증 설정이 필요합니다.`);
   for (const check of value.checks) {
-    const command = check.command?.join(" ").replace(/[`|<>]/g, "").slice(0, 100) ?? "명령 미등록";
+    const command = check.command ? redactValidationLog(check.command.join(" ")).replace(/[`|<>]/g, "").slice(0, 100) : "명령 미등록";
     lines.push(`- ${check.name} (${check.kind}): **${statusLabel[check.result]}** · \`${command}\` · 종료 코드 ${check.exitCode ?? "없음"}${check.reason ? ` · ${check.reason}` : ""}`);
   }
   const missing = kinds.filter((kind) => !value.checks.some((check) => check.kind === kind));

@@ -132,6 +132,9 @@ test("같은 SHA의 소스를 실행하고 CI를 직접 읽어 비공개 영수�
   invented.memory.validations[1].result = "failed";
   assert.throws(() => normalizeReviewResult(invented, { verification: verified }), { code: "review_test_claim_invalid" });
   assert.deepEqual(verificationMemory(verified), augmented.memory.validations);
+  const accidentalCredential = structuredClone(verified);
+  accidentalCredential.checks[0].command = ["test", "--token=fixture-sensitive-command"];
+  assert.doesNotMatch(attachVerification(review, accidentalCredential).body, /fixture-sensitive-command/);
   await writeFile(join(dataDir, "validation", `${verified.runId}.json`), "{}");
   await assert.rejects(service.restore(reference), { code: "verification_receipt_invalid" });
 });
