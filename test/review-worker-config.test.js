@@ -55,7 +55,7 @@ test("invalid host, worker intervals and unrecognized activation values fail saf
   }
   for (const extra of [{ REVIEWBOT_AUTO_REVIEW: "true" }, { REVIEWBOT_WORKER_INTERVAL_MS: "0" },
     { REVIEWBOT_REVIEW_TIMEOUT_MS: "900001" }, { REVIEWBOT_REVIEW_COMMAND: "claude\ncommand" },
-    { REVIEWBOT_MATTERMOST_CHANNEL: "@all" }, { REVIEWBOT_GITLAB_PROJECT_IDS: "-1" }]) {
+    { REVIEWBOT_MATTERMOST_CHANNEL: "@all" }, { REVIEWBOT_GITLAB_PROJECT_IDS: "-1" }, { REVIEWBOT_VALIDATION_CONFIG: "from-mr/config.json" }]) {
     assert.throws(() => workerSettings({ ...settings, ...extra }));
   }
   const native = "C:\\Program Files\\Claude\\claude.exe";

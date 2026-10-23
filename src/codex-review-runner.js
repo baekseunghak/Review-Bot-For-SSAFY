@@ -86,7 +86,7 @@ export class CodexReviewRunner {
       args.push("-");
       const output = await runReviewProcess({ command: this.command, args, directory, env: this.env,
         input: serialized, spawnImpl: this.spawn, timeoutMs: this.timeoutMs, maxOutputBytes: this.maxOutputBytes, signal });
-      return normalizeReviewResult(completedReview(output), { context: input?.context, changes: input?.changes });
+      return normalizeReviewResult(completedReview(output), { context: input?.context, changes: input?.changes, verification: input?.verification });
     });
   }
 }

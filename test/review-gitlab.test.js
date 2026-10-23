@@ -76,6 +76,61 @@ test("자동 리뷰는 숫자 프로젝트 허용 목록과 안전한 host를 �
   assert.equal(calls.length, 0);
 });
 
+test("CI는 정확히 해당 SHA의 최신 파이프라인과 건너뜀·허용 실패·테스트 보고서를 확인한다", async () => {
+  const pipeline = { id: 80, project_id: 12, sha: headSha, status: "success", source: "push",
+    web_url: `https://${host}/group/repo/-/pipelines/80` };
+  const { client, calls } = fixture({ intercept: ({ endpoint }) => {
+    if (endpoint.startsWith("projects/12/pipelines?sha=")) return [{ ...pipeline, id: 79 }, pipeline];
+    if (endpoint === "projects/12/pipelines/80") return pipeline;
+    if (endpoint.includes("/80/jobs?")) return [{ id: 5, name: "test", stage: "test", status: "skipped", allow_failure: false,
+      pipeline: { id: 80, sha: headSha }, web_url: `https://${host}/group/repo/-/jobs/5` },
+    { id: 6, name: "lint", stage: "check", status: "failed", allow_failure: true,
+      pipeline: { id: 80, sha: headSha }, web_url: `https://${host}/group/repo/-/jobs/6` }];
+    if (endpoint.includes("/80/bridges?")) return [];
+    if (endpoint.endsWith("/test_report_summary")) return { total: { count: 10, success: 8, failed: 0, skipped: 2, error: 0 } };
+  } });
+  const result = await client.readCi({ ...input, headSha });
+  assert.equal(result.pipeline.id, 80);
+  assert.equal(result.jobs[0].status, "skipped");
+  assert.equal(result.jobs[1].allowFailure, true);
+  assert.deepEqual(result.tests, { count: 10, passed: 8, failed: 0, skipped: 2, errors: 0 });
+  assert.ok(calls[0].endpoint.includes(`sha=${headSha}`));
+  assert.ok(calls.every((call) => call.method === "GET"));
+});
+
+test("다른 SHA·프로젝트의 CI를 성공 근거로 쓰지 않고 파이프라인 없음과 보고서 부재를 구분한다", async () => {
+  for (const other of [{ sha: baseSha }, { project_id: 999 }]) {
+    const { client } = fixture({ intercept: ({ endpoint }) => endpoint.includes("/pipelines?")
+      ? [{ id: 1, project_id: 12, sha: headSha, ...other }] : undefined });
+    await assert.rejects(client.readCi({ ...input, headSha }), { code: "invalid_gitlab_response" });
+  }
+  const absent = fixture({ intercept: ({ endpoint }) => endpoint.includes("/pipelines?") ? [] : undefined });
+  assert.equal((await absent.client.readCi({ ...input, headSha })).status, "not_found");
+  const pipeline = { id: 1, project_id: 12, sha: headSha, status: "success", web_url: `https://${host}/group/repo/-/pipelines/1` };
+  const noReport = fixture({ intercept: ({ endpoint }) => {
+    if (endpoint.includes("/pipelines?")) return [pipeline];
+    if (endpoint.endsWith("/pipelines/1")) return pipeline;
+    if (endpoint.includes("/jobs?") || endpoint.includes("/bridges?")) return [];
+    if (endpoint.endsWith("test_report_summary")) return { message: "Not available" };
+  } });
+  assert.equal((await noReport.client.readCi({ ...input, headSha })).tests, null);
+});
+
+test("소스 아카이브는 SHA를 검증한 뒤 바이너리로 받아 호스트에서 추출하지 않는다", async () => {
+  const calls = [];
+  const client = new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: async (file, args, options) => {
+    calls.push({ args, options });
+    if (args[1].includes("/commits/")) return JSON.stringify({ id: headSha });
+    assert.equal(options.encoding, "buffer");
+    return Buffer.from([0x1f, 0x8b, 0x00]);
+  } });
+  const result = await client.archive({ ...input, headSha });
+  assert.ok(Buffer.isBuffer(result.data));
+  assert.equal(result.sha, headSha);
+  assert.match(calls[1].args[1], new RegExp(`archive.tar.gz\\?sha=${headSha}$`));
+  await assert.rejects(client.archive({ ...input, headSha: "main" }));
+});
+
 test("실제 MR 신원·SHA·전체 diff와 변경 전후 파일·설명·댓글을 수집한다", async () => {
   const { client, calls } = fixture({ notes: [
     { id: 1, body: "decided due to retries", author: { id: 8, username: "dev.one" }, created_at: "2026-10-20T00:00:00Z", system: false },

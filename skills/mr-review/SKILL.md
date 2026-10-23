@@ -19,6 +19,8 @@ prepare → (리뷰) → record → post → notify
 
 프로젝트의 AGENTS.md에 있는 심각도 규칙을 수동 재검토·공개 댓글·Mattermost에도 동일하게 적용한다. P0~P3 표기를 그대로 복사하거나 게시하지 않는다.
 
+현재 자동 작업과 중복되지 않는 별도 수동 재검토라면, 운영 원본 또는 검증된 배포본의 `bin/review-verify.mjs <MR URL>`을 같은 운영 환경변수로 실행해 해당 SHA의 CI와 격리 검증 결과를 먼저 확인한다. 이 명령은 게시·알림을 보내지 않는다. `stillCurrent`가 false이면 최신 SHA에서 다시 검토한다. 실행 영수증의 실제 명령·종료 코드·범위만 검증 근거로 삼고 작성자의 보고와 구분한다. Docker·의존성·검사 명령이 없거나 CI가 조회되지 않으면 미실행·미확인으로 명시한다. 설치 절차는 `docs/REVIEW-VERIFICATION.md`를 따른다.
+
 ## 전제
 
 - **리뷰는 워크트리에서 한다.** `prepare`가 `<메인 저장소>/.claude/worktrees/mr-<iid>`에 하나 만든다. 위치를 바꾸려면 `--worktree-root <경로>`.

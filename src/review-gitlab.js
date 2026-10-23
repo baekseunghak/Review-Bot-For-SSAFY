@@ -8,9 +8,10 @@ const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 100;
 
-function fail(code, message) {
+function fail(code, message, details = {}) {
   const error = new UserError(message);
   error.code = code;
+  Object.assign(error, details);
   throw error;
 }
 
@@ -94,8 +95,9 @@ export class GitlabReviewClient {
         maxBuffer: Math.max(4 * 1024 * 1024, this.maxContextBytes * 2),
       });
       value = JSON.parse(result);
-    } catch {
-      fail("gitlab_request_failed", "GitLab request failed. Check glab authentication and project access.");
+    } catch (error) {
+      const status = [...String(error?.stderr ?? "").matchAll(/\bHTTP\s+(\d{3})\b/g)].at(-1)?.[1];
+      fail("gitlab_request_failed", "GitLab request failed. Check glab authentication and project access.", status ? { httpStatus: Number(status) } : {});
     }
     if (!value || typeof value !== "object" || value.error || (!Array.isArray(value) && value.message)) {
       fail("gitlab_request_failed", "GitLab returned an invalid or rejected response.");
@@ -152,6 +154,73 @@ export class GitlabReviewClient {
 
   async readHead(input) {
     return this.snapshot(await this.api(this.address(input)), input);
+  }
+
+  async readCi(input) {
+    this.address(input);
+    if (!SHA.test(input.headSha ?? "")) fail("invalid_input", "A full commit SHA is required for CI verification.");
+    const sha = input.headSha.toLowerCase();
+    const pipelines = await this.api(`projects/${input.projectId}/pipelines?sha=${sha}&order_by=id&sort=desc&per_page=100`);
+    if (!Array.isArray(pipelines) || pipelines.length > 100 || pipelines.some((item) => !Number.isSafeInteger(item?.id) || item.id < 1
+      || item.sha?.toLowerCase() !== sha || (item.project_id !== undefined && item.project_id !== input.projectId))) {
+      fail("invalid_gitlab_response", "CI pipeline identity does not match the reviewed commit.");
+    }
+    if (!pipelines.length) return { status: "not_found", sha, pipeline: null, jobs: [], bridges: [], tests: null };
+    const id = Math.max(...pipelines.map((item) => item.id));
+    const endpoint = `projects/${input.projectId}/pipelines/${id}`;
+    const pipeline = await this.api(endpoint);
+    if (pipeline.id !== id || pipeline.project_id !== input.projectId || pipeline.sha?.toLowerCase() !== sha
+      || !/^[a-z_]+$/.test(pipeline.status ?? "")) fail("invalid_gitlab_response", "CI pipeline changed identity.");
+    const publicUrl = (value) => {
+      const url = new URL(value);
+      if (url.host !== this.host || !["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+        fail("invalid_gitlab_response", "CI result URL does not match GitLab.");
+      }
+      return url.href;
+    };
+    const jobResult = (job) => {
+      if (!Number.isSafeInteger(job?.id) || job.id < 1 || typeof job.name !== "string" || typeof job.stage !== "string"
+        || !/^[a-z_]+$/.test(job.status ?? "") || typeof job.allow_failure !== "boolean"
+        || job.pipeline?.id !== id || job.pipeline?.sha?.toLowerCase() !== sha) {
+        fail("invalid_gitlab_response", "CI job identity does not match the selected pipeline.");
+      }
+      return { id: job.id, name: job.name.slice(0, 160), stage: job.stage.slice(0, 80), status: job.status,
+        allowFailure: job.allow_failure, url: publicUrl(job.web_url), failureReason: /^[a-z_]+$/.test(job.failure_reason ?? "") ? job.failure_reason : null };
+    };
+    const jobs = (await this.pages(`${endpoint}/jobs?include_retried=false`)).map(jobResult);
+    // Bridge status is reported separately; it does not prove the child pipeline's tests ran.
+    let bridges = [], bridgeError = null, tests = null, testReportError = null;
+    try { bridges = (await this.pages(`${endpoint}/bridges`)).map(jobResult); }
+    catch { bridgeError = "unavailable"; }
+    try {
+      const report = await this.api(`${endpoint}/test_report_summary`);
+      const total = report.total;
+      if (!total || total.suite_error || ["count", "success", "failed", "skipped", "error"].some((key) => !Number.isSafeInteger(total[key]) || total[key] < 0)
+        || total.count !== total.success + total.failed + total.skipped + total.error) {
+        throw new Error("Invalid test report.");
+      }
+      tests = { count: total.count, passed: total.success, failed: total.failed, skipped: total.skipped, errors: total.error };
+    } catch { testReportError = "unavailable"; }
+    return { status: pipeline.status, sha, pipeline: { id, url: publicUrl(pipeline.web_url),
+      source: String(pipeline.source ?? "unknown").slice(0, 80) }, jobs, bridges, bridgeError, tests, testReportError,
+      checkedAt: new Date().toISOString() };
+  }
+
+  async archive(input, { signal } = {}) {
+    this.address(input);
+    if (!SHA.test(input.headSha ?? "")) fail("invalid_input", "A full commit SHA is required for the source archive.");
+    const sha = input.headSha.toLowerCase();
+    const commit = await this.api(`projects/${input.projectId}/repository/commits/${sha}`);
+    if (commit.id?.toLowerCase() !== sha) fail("invalid_gitlab_response", "Source archive commit did not match.");
+    let data;
+    try {
+      data = await this.runImpl("glab", ["api", `projects/${input.projectId}/repository/archive.tar.gz?sha=${sha}`,
+        "--hostname", this.host, "--method", "GET"], { shell: false, encoding: "buffer", maxBuffer: 128 * 1024 * 1024, signal });
+    } catch { fail("archive_unavailable", "The reviewed source archive could not be downloaded."); }
+    if (!Buffer.isBuffer(data) || data.length > 128 * 1024 * 1024 || data[0] !== 0x1f || data[1] !== 0x8b) {
+      fail("archive_invalid", "GitLab did not return a bounded gzip source archive.");
+    }
+    return { data, sha, sha256: hash(data), source: "gitlab_archive" };
   }
 
   async readReview(input) {

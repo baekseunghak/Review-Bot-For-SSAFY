@@ -4,6 +4,7 @@ import { normalizeReviewResult, ClaudeReviewRunner } from "./review-runner.js";
 import { CodexReviewRunner } from "./codex-review-runner.js";
 import { GitlabReviewClient } from "./review-gitlab.js";
 import { MattermostReviewNotifier } from "./review-notifier.js";
+import { ReviewVerificationService, attachVerification } from "./review-verification.js";
 
 function problem(code) { return Object.assign(new UserError("Automatic review could not complete. Check the worker job status."), { code }); }
 const OBSOLETE = new Set(["request_obsolete", "stale_head", "review_not_open"]);
@@ -11,8 +12,8 @@ const TERMINAL = new Set(["comment_conflict", "duplicate_comment", "unsupported_
 
 export class ReviewWorker {
   constructor({ inbox, gitlab, contextService, runner, notifier, now = () => new Date(),
-    leaseMs = 120_000, retryDelayMs = 60_000, maxAttempts = 5, intervalMs = 5000 }) {
-    Object.assign(this, { inbox, gitlab, contextService, runner, notifier, now, leaseMs, retryDelayMs, maxAttempts, intervalMs });
+    verificationService, leaseMs = 120_000, retryDelayMs = 60_000, maxAttempts = 5, intervalMs = 5000 }) {
+    Object.assign(this, { inbox, gitlab, contextService, runner, notifier, verificationService, now, leaseMs, retryDelayMs, maxAttempts, intervalMs });
     this.task = null;
     this.timer = null;
     this.controller = null;
@@ -73,7 +74,18 @@ export class ReviewWorker {
             mrSource: { title: changes.title.slice(0, 512), description: changes.description.slice(0, 16_000), descriptionTruncated: changes.description.length > 16_000 } });
           current();
           this.#assertHead(await this.gitlab.readHead(job), job.headSha);
-          const result = normalizeReviewResult(await this.runner.review({ context: bundle, changes }, { signal: controller.signal }), { context: bundle, changes });
+          let verification = artifact.verification;
+          if (this.verificationService && verification?.headSha !== job.headSha) {
+            checkpoint("validating");
+            verification = await this.verificationService.collect(job, { signal: controller.signal });
+            current();
+            this.#assertHead(await this.gitlab.readHead(job), job.headSha);
+            checkpoint("reviewing", { verification });
+          }
+          const options = { context: bundle, changes, verification };
+          let result = normalizeReviewResult(await this.runner.review({ context: bundle, changes,
+            ...(verification ? { verification } : {}) }, { signal: controller.signal }), options);
+          if (verification) result = normalizeReviewResult(attachVerification(result, verification), options);
           current();
           checkpoint("reviewed", { review: result,
             contextRef: { mrUrl: bundle.mrUrl, headSha: bundle.headSha, contextVersion: bundle.contextVersion },
@@ -81,14 +93,15 @@ export class ReviewWorker {
         }
         current();
         this.#assertHead(await this.gitlab.readHead(job), job.headSha);
-        const review = normalizeReviewResult(artifact.review, { context: bundle });
+        const review = normalizeReviewResult(artifact.review, { context: bundle, verification: artifact.verification });
         const saved = await this.contextService.completeReview({ ...artifact.contextRef, verdict: review.verdict, memory: review.memory });
         current();
         checkpoint("posting", { completion: { id: saved.id, headSha: saved.headSha, contextVersion: saved.contextVersion } });
       }
       if (stage === "posting") {
         owned();
-        const review = normalizeReviewResult(artifact.review);
+        if (artifact.verification && artifact.verification.headSha !== job.headSha) throw problem("invalid_checkpoint");
+        const review = normalizeReviewResult(artifact.review, { verification: artifact.verification });
         if (!artifact.completion?.id || artifact.completion.headSha !== job.headSha
           || artifact.completion.contextVersion !== artifact.contextRef?.contextVersion) throw problem("invalid_checkpoint");
         // Existing marked comments can be reconciled even after the MR moves to a new head.
@@ -152,8 +165,10 @@ export function createConfiguredReviewWorker({ inbox, contextService, mattermost
   const provider = settings.provider ?? "claude";
   if (!["claude", "codex"].includes(provider)) throw new UserError("Unsupported review provider.");
   const Runner = provider === "codex" ? CodexReviewRunner : ClaudeReviewRunner;
+  const gitlab = new GitlabReviewClient({ host: settings.host, allowedProjectIds: settings.projectIds });
   return new ReviewWorker({ inbox, contextService,
-    gitlab: new GitlabReviewClient({ host: settings.host, allowedProjectIds: settings.projectIds }),
+    gitlab, verificationService: new ReviewVerificationService({ gitlab, dataDir: settings.dataDir,
+      ...(settings.validationConfigPath ? { configPath: settings.validationConfigPath } : {}) }),
     runner: new Runner({ command: settings.command, model: settings.model, timeoutMs: settings.timeoutMs }),
     notifier: new MattermostReviewNotifier({ service: mattermost, channelName: settings.channelName }),
     intervalMs: settings.intervalMs });

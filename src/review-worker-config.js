@@ -1,5 +1,6 @@
 import { UserError } from "./core.js";
 import { reviewSettings } from "./review-config.js";
+import { isAbsolute, win32 } from "node:path";
 
 function integer(value, fallback, min, max, name) {
   if (value === undefined || value === "") return fallback;
@@ -30,7 +31,10 @@ export function workerSettings(env = process.env) {
   if (!host) missing.push("REVIEWBOT_GITLAB_HOST");
   if (!projectIds.length) missing.push("REVIEWBOT_GITLAB_PROJECT_IDS");
   if (!channelName) missing.push("REVIEWBOT_MATTERMOST_CHANNEL");
-  return { dataDir, enabled, ready: enabled && !missing.length, missing, host: host.toLowerCase(), projectIds, channelName, provider, command, model,
+  const validationConfigPath = env.REVIEWBOT_VALIDATION_CONFIG?.trim() || null;
+  if (validationConfigPath && ((!isAbsolute(validationConfigPath) && !win32.isAbsolute(validationConfigPath))
+    || /[\x00-\x1f]/.test(validationConfigPath) || validationConfigPath.length > 2048)) throw new UserError("Invalid REVIEWBOT_VALIDATION_CONFIG.");
+  return { dataDir, enabled, ready: enabled && !missing.length, missing, host: host.toLowerCase(), projectIds, channelName, provider, command, model, validationConfigPath,
     intervalMs: integer(env.REVIEWBOT_WORKER_INTERVAL_MS, 5000, 1000, 300_000, "REVIEWBOT_WORKER_INTERVAL_MS"),
     timeoutMs: integer(env.REVIEWBOT_REVIEW_TIMEOUT_MS, 180_000, 1000, 900_000, "REVIEWBOT_REVIEW_TIMEOUT_MS") };
 }

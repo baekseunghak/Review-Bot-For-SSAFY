@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "host": "gitlab.example.com",
+      "projectId": 123,
+      "checks": [
+        {
+          "name": "backend-test",
+          "kind": "test",
+          "image": "reviewbot-java:local",
+          "directory": "backend",
+          "command": [
+            "/bin/sh",
+            "-c",
+            "mkdir -p /tmp/gradle && cp -a /opt/gradle-seed/. /tmp/gradle/ && sh gradlew --offline --no-daemon --console=plain test"
+          ],
+          "timeoutMs": 300000
+        },
+        {
+          "name": "backend-build",
+          "kind": "build",
+          "image": "reviewbot-java:local",
+          "directory": "backend",
+          "command": [
+            "/bin/sh",
+            "-c",
+            "mkdir -p /tmp/gradle && cp -a /opt/gradle-seed/. /tmp/gradle/ && sh gradlew --offline --no-daemon --console=plain assemble"
+          ],
+          "timeoutMs": 300000
+        },
+        {
+          "name": "backend-lint",
+          "kind": "lint",
+          "directory": "backend",
+          "command": null,
+          "reason": "lint_task_not_configured"
+        },
+        {
+          "name": "frontend-test",
+          "kind": "test",
+          "directory": "frontend",
+          "command": null,
+          "reason": "test_script_not_defined"
+        },
+        {
+          "name": "frontend-build",
+          "kind": "build",
+          "image": "reviewbot-node:local",
+          "directory": "frontend",
+          "command": [
+            "/bin/sh",
+            "-c",
+            "node -e 'const f=require(\"fs\"),a=JSON.parse(f.readFileSync(\"package.json\")),b=JSON.parse(f.readFileSync(\"/opt/dependencies/package.json\"));for(const k of [\"dependencies\",\"devDependencies\",\"optionalDependencies\",\"peerDependencies\",\"overrides\",\"workspaces\",\"engines\"])if(JSON.stringify(a[k])!==JSON.stringify(b[k]))process.exit(122)' && test \"$(tr -d '\\r' < package-lock.json | sha256sum | cut -d ' ' -f 1)\" = \"$(cat /opt/node-lock.sha256)\" || exit 122; cp -a /opt/dependencies/node_modules ./node_modules && npm run build"
+          ]
+        },
+        {
+          "name": "frontend-lint",
+          "kind": "lint",
+          "image": "reviewbot-node:local",
+          "directory": "frontend",
+          "command": [
+            "/bin/sh",
+            "-c",
+            "node -e 'const f=require(\"fs\"),a=JSON.parse(f.readFileSync(\"package.json\")),b=JSON.parse(f.readFileSync(\"/opt/dependencies/package.json\"));for(const k of [\"dependencies\",\"devDependencies\",\"optionalDependencies\",\"peerDependencies\",\"overrides\",\"workspaces\",\"engines\"])if(JSON.stringify(a[k])!==JSON.stringify(b[k]))process.exit(122)' && test \"$(tr -d '\\r' < package-lock.json | sha256sum | cut -d ' ' -f 1)\" = \"$(cat /opt/node-lock.sha256)\" || exit 122; cp -a /opt/dependencies/node_modules ./node_modules && npm run lint"
+          ]
+        },
+        {
+          "name": "screening-test",
+          "kind": "test",
+          "image": "reviewbot-python:local",
+          "directory": "screening",
+          "command": [
+            "/bin/sh",
+            "-c",
+            "test \"$(tr -d '\\r' < requirements.txt | sha256sum | cut -d ' ' -f 1)\" = \"$(cat /opt/python-lock.sha256)\" || exit 122; python -m pytest -q"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -41,6 +41,7 @@ async function installWorkerFixture() {
     if (file !== "glab" || args[0] !== "api" || args[args.indexOf("--hostname") + 1] !== "gitlab.example.test") return unexpected("CLI identity");
     const endpoint = args[1];
     const method = args.includes("--method") ? args[args.indexOf("--method") + 1] : "GET";
+    if (endpoint.startsWith(`projects/10/pipelines?sha=${sha}&`) && method === "GET") return [];
     if (endpoint === "user" && method === "GET") return { id: 999, username: "reviewbot" };
     if (["projects/10/merge_requests/7", "projects/team%2Frepo/merge_requests/7"].includes(endpoint) && method === "GET") return mr;
     if (endpoint.startsWith("projects/10/merge_requests/7/notes?") && method === "GET") return effects.notes;

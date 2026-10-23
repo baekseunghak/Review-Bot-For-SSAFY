@@ -197,6 +197,31 @@ test("웹훅 요청은 실제 코드 검토·누적 기록·MR 댓글·Mattermos
   assert.deepEqual(await f.makeWorker().runOnce(), { status: "idle" });
 });
 
+test("격리 실행 결과를 모델·댓글·누적 기록에 연결하고 모델 실패 재시도에 검증을 반복하지 않는다", async (t) => {
+  const f = fixture(t);
+  let verificationCalls = 0;
+  const verification = { schemaVersion: 1, runId: "fixture-verification", projectId: 12, mrIid: 7, headSha: HEAD,
+    configuration: "configured", startedAt: INITIAL_TIME, finishedAt: INITIAL_TIME,
+    ci: { status: "not_found", sha: HEAD, pipeline: null, jobs: [], bridges: [], tests: null },
+    checks: [{ name: "backend-test", kind: "test", command: ["test"], result: "passed", exitCode: 0, reason: null }] };
+  const verificationService = { async collect() { verificationCalls++; return verification; } };
+  const runner = { async review(input) {
+    assert.equal(input.verification.headSha, HEAD);
+    if (f.calls.reviews.length === 0) { f.calls.reviews.push(input); throw Object.assign(new Error("fixture failure"), { code: "runner_timeout" }); }
+    return result();
+  } };
+  f.send();
+  assert.equal((await f.makeWorker({ verificationService, runner }).runOnce()).status, "failed");
+  f.advance();
+  assert.equal((await f.makeWorker({ verificationService, runner }).runOnce()).status, "completed");
+  assert.equal(verificationCalls, 1);
+  assert.match(f.notes[0].body, /backend-test.*통과/);
+  const saved = f.contextService.reviewHistory().records[0];
+  assert.ok(saved.memory.validations.some((item) => item.check === "격리 test: backend-test" && item.result === "passed" && item.basis === "observed"));
+  assert.equal(f.notes.length, 1);
+  assert.equal(f.calls.notifications.length, 1);
+});
+
 test("MR 설명의 SHA-256은 Jira 후보에서 제외하고 실제 이슈와 리뷰·게시·알림을 처리한다", async (t) => {
   const f = fixture(t);
   f.changeMr({ description: "SHA-256을 사용해 응답을 검증합니다. OTHER-12는 외부 참조입니다." });
