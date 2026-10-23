@@ -19,9 +19,11 @@ export function validationProfile(value, host, projectId) {
     if (!check || Object.keys(check).some((key) => !["name", "kind", "directory", "image", "command", "reason", "timeoutMs"].includes(key))
       || !/^[a-z][a-z0-9_-]{0,63}$/.test(check.name ?? "") || names.has(check.name)
       || !kinds.includes(check.kind) || typeof check.directory !== "string" || isAbsolute(check.directory) || win32.isAbsolute(check.directory)
+      || check.directory.length > 512
       || /[\\:\x00-\x1f]/.test(check.directory) || (check.directory !== "." && check.directory.split("/").some((part) => !part || part === "." || part === ".."))
       || (check.command !== null && (!Array.isArray(check.command) || !check.command.length || check.command.length > 32
-        || check.command.some((arg) => typeof arg !== "string" || !arg || arg.length > 2_000 || /[\x00-\x1f]/.test(arg))))
+        || check.command.some((arg) => typeof arg !== "string" || !arg || arg.length > 2_000 || /[\x00-\x1f]/.test(arg))
+        || Buffer.byteLength(check.command.join(" "), "utf8") > 2_048))
       || (check.command !== null && (typeof check.image !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.:/@-]{0,255}$/.test(check.image)))
       || (check.reason !== undefined && !/^[a-z][a-z0-9_]{0,79}$/.test(check.reason))
       || (check.timeoutMs !== undefined && (!Number.isSafeInteger(check.timeoutMs) || check.timeoutMs < 1000 || check.timeoutMs > 900_000))) {
@@ -35,6 +37,20 @@ export function validationProfile(value, host, projectId) {
 export class ReviewVerificationService {
   constructor({ gitlab, dataDir, configPath = join(dataDir, "validation-projects.json"), sandbox = new DockerReviewSandbox(), now = () => new Date() }) {
     Object.assign(this, { gitlab, dataDir, configPath, sandbox, now });
+  }
+
+  async restore(reference) {
+    try {
+      if (!/^[a-f0-9]{32}$/.test(reference.runId ?? "") || !/^[a-f0-9]{64}$/.test(reference.receiptSha256 ?? "")) throw new Error();
+      const path = join(this.dataDir, "validation", `${reference.runId}.json`);
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 1_000_000) throw new Error();
+      const encoded = await readFile(path, "utf8");
+      if (hash(encoded) !== reference.receiptSha256) throw new Error();
+      const result = JSON.parse(encoded);
+      if (result.headSha !== reference.headSha || result.projectId !== reference.projectId || result.mrIid !== reference.mrIid) throw new Error();
+      return { ...result, receiptSha256: reference.receiptSha256 };
+    } catch { throw Object.assign(new Error("Saved verification receipt is missing or changed."), { code: "verification_receipt_invalid" }); }
   }
 
   async collect(input, { signal } = {}) {
@@ -68,14 +84,21 @@ export class ReviewVerificationService {
     // Read CI after local checks so a pipeline that finished meanwhile is not reported as still running.
     try { result.ci = await this.gitlab.readCi(input); }
     catch (error) { result.ci = { status: "unavailable", sha: input.headSha, pipeline: null, jobs: [], bridges: [], tests: null,
-      httpStatus: error.httpStatus ?? null }; }
+      httpStatus: error.httpStatus ?? null, reason: /^[a-z][a-z0-9_]{0,63}$/.test(error.code ?? "") ? error.code : "ci_query_failed" }; }
     result.finishedAt = this.now().toISOString();
     const root = join(this.dataDir, "validation");
     await mkdir(root, { recursive: true, mode: 0o700 });
     if ((await lstat(root)).isSymbolicLink()) throw new Error("Validation storage cannot be a symlink.");
-    await writeFile(join(root, `${runId}.json`), JSON.stringify(result, null, 2), { flag: "wx", mode: 0o600 });
-    return result;
+    const encoded = JSON.stringify(result, null, 2);
+    await writeFile(join(root, `${runId}.json`), encoded, { flag: "wx", mode: 0o600 });
+    return { ...result, receiptSha256: hash(encoded) };
   }
+}
+
+export function verificationReference(result) {
+  if (!result.receiptSha256) return result;
+  const { projectId, mrIid, headSha, runId, receiptSha256 } = result;
+  return { projectId, mrIid, headSha, runId, receiptSha256 };
 }
 
 export function verificationMemory(verification) {

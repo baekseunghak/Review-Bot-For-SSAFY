@@ -31,6 +31,7 @@ const ERROR_MESSAGES = new Map(Object.entries({
   review_locations_invalid: "확정한 지적의 파일·줄 위치가 제공된 실제 코드와 맞지 않습니다.",
   review_memory_invalid: "누적 리뷰 기록의 형식이나 출처 근거가 요구 조건과 다릅니다.",
   review_test_claim_invalid: "직접 실행하지 않은 검증의 성공·실패를 직접 확인한 결과로 기록했습니다.",
+  verification_receipt_invalid: "저장된 실행 검증 영수증이 없거나 변경됐습니다. 원본 파일과 해시를 확인한 뒤 조치하세요.",
 }));
 
 function invalid() {

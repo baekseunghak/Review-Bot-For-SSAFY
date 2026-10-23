@@ -4,11 +4,11 @@ import { normalizeReviewResult, ClaudeReviewRunner } from "./review-runner.js";
 import { CodexReviewRunner } from "./codex-review-runner.js";
 import { GitlabReviewClient } from "./review-gitlab.js";
 import { MattermostReviewNotifier } from "./review-notifier.js";
-import { ReviewVerificationService, attachVerification } from "./review-verification.js";
+import { ReviewVerificationService, attachVerification, verificationReference } from "./review-verification.js";
 
 function problem(code) { return Object.assign(new UserError("Automatic review could not complete. Check the worker job status."), { code }); }
 const OBSOLETE = new Set(["request_obsolete", "stale_head", "review_not_open"]);
-const TERMINAL = new Set(["comment_conflict", "duplicate_comment", "unsupported_content", "no_reviewable_text", "context_too_large", "incomplete_context", "notification_setup_missing", "review_author_unmapped"]);
+const TERMINAL = new Set(["comment_conflict", "duplicate_comment", "unsupported_content", "no_reviewable_text", "context_too_large", "incomplete_context", "notification_setup_missing", "review_author_unmapped", "verification_receipt_invalid"]);
 
 export class ReviewWorker {
   constructor({ inbox, gitlab, contextService, runner, notifier, now = () => new Date(),
@@ -32,6 +32,7 @@ export class ReviewWorker {
     const { id, leaseToken } = job;
     let stage = job.stage;
     let artifact = job.artifact;
+    let verification;
     let lostLease = false;
     const controller = new AbortController();
     this.controller = controller;
@@ -55,6 +56,12 @@ export class ReviewWorker {
     heartbeat.unref();
     try {
       if (["notifying", "notification_unknown"].includes(stage)) throw problem("notification_unknown");
+      if (stage !== "posted" && artifact.verification) {
+        verification = artifact.verification.receiptSha256
+          ? await this.verificationService.restore(artifact.verification) : artifact.verification;
+        if (verification.headSha !== job.headSha || (verification.projectId !== undefined && verification.projectId !== job.projectId)
+          || (verification.mrIid !== undefined && verification.mrIid !== job.mrIid)) throw problem("invalid_checkpoint");
+      }
       if (!["posting", "posted"].includes(stage)) {
         current();
         let bundle;
@@ -74,13 +81,12 @@ export class ReviewWorker {
             mrSource: { title: changes.title.slice(0, 512), description: changes.description.slice(0, 16_000), descriptionTruncated: changes.description.length > 16_000 } });
           current();
           this.#assertHead(await this.gitlab.readHead(job), job.headSha);
-          let verification = artifact.verification;
           if (this.verificationService && verification?.headSha !== job.headSha) {
             checkpoint("validating");
             verification = await this.verificationService.collect(job, { signal: controller.signal });
             current();
             this.#assertHead(await this.gitlab.readHead(job), job.headSha);
-            checkpoint("reviewing", { verification });
+            checkpoint("reviewing", { verification: verificationReference(verification) });
           }
           const options = { context: bundle, changes, verification };
           let result = normalizeReviewResult(await this.runner.review({ context: bundle, changes,
@@ -93,15 +99,14 @@ export class ReviewWorker {
         }
         current();
         this.#assertHead(await this.gitlab.readHead(job), job.headSha);
-        const review = normalizeReviewResult(artifact.review, { context: bundle, verification: artifact.verification });
+        const review = normalizeReviewResult(artifact.review, { context: bundle, verification });
         const saved = await this.contextService.completeReview({ ...artifact.contextRef, verdict: review.verdict, memory: review.memory });
         current();
         checkpoint("posting", { completion: { id: saved.id, headSha: saved.headSha, contextVersion: saved.contextVersion } });
       }
       if (stage === "posting") {
         owned();
-        if (artifact.verification && artifact.verification.headSha !== job.headSha) throw problem("invalid_checkpoint");
-        const review = normalizeReviewResult(artifact.review, { verification: artifact.verification });
+        const review = normalizeReviewResult(artifact.review, { verification });
         if (!artifact.completion?.id || artifact.completion.headSha !== job.headSha
           || artifact.completion.contextVersion !== artifact.contextRef?.contextVersion) throw problem("invalid_checkpoint");
         // Existing marked comments can be reconciled even after the MR moves to a new head.

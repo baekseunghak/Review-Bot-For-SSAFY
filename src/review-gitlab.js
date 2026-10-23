@@ -173,7 +173,7 @@ export class GitlabReviewClient {
       || !/^[a-z_]+$/.test(pipeline.status ?? "")) fail("invalid_gitlab_response", "CI pipeline changed identity.");
     const publicUrl = (value) => {
       const url = new URL(value);
-      if (url.host !== this.host || !["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      if (value.length > 2048 || url.host !== this.host || !["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
         fail("invalid_gitlab_response", "CI result URL does not match GitLab.");
       }
       return url.href;
@@ -201,9 +201,11 @@ export class GitlabReviewClient {
       }
       tests = { count: total.count, passed: total.success, failed: total.failed, skipped: total.skipped, errors: total.error };
     } catch { testReportError = "unavailable"; }
-    return { status: pipeline.status, sha, pipeline: { id, url: publicUrl(pipeline.web_url),
+    const result = { status: pipeline.status, sha, pipeline: { id, url: publicUrl(pipeline.web_url),
       source: String(pipeline.source ?? "unknown").slice(0, 80) }, jobs, bridges, bridgeError, tests, testReportError,
       checkedAt: new Date().toISOString() };
+    if (Buffer.byteLength(JSON.stringify(result), "utf8") > 32_000) fail("ci_context_too_large", "CI metadata exceeds the bounded review context.");
+    return result;
   }
 
   async archive(input, { signal } = {}) {

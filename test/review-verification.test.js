@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DockerReviewSandbox, redactValidationLog } from "../src/review-sandbox.js";
-import { ReviewVerificationService, validationProfile, attachVerification, verificationMemory } from "../src/review-verification.js";
+import { ReviewVerificationService, validationProfile, attachVerification, verificationMemory, verificationReference } from "../src/review-verification.js";
 import { normalizeReviewResult } from "../src/review-runner.js";
 
 const sha = "a".repeat(40), imageId = `sha256:${"b".repeat(64)}`;
@@ -85,6 +85,15 @@ test("검증 로그의 토큰·인증 URL·터미널 제어 문자를 모델 입
   const redacted = redactValidationLog("\x1b[31mfailed token=fixture-sensitive https://user:password@example.test glpat-example1234567890\x00");
   assert.doesNotMatch(redacted, /fixture-sensitive|user:password|glpat-|\x1b|\x00/);
   assert.match(redacted, /failed/);
+  assert.doesNotMatch(redactValidationLog("Authorization: Bearer opaque-fixture-credential"), /opaque-fixture-credential/);
+  assert.doesNotMatch(redactValidationLog("-----BEGIN PRIVATE KEY-----\nfixture-incomplete-material"), /fixture-incomplete-material/);
+});
+
+test("다국어 진단 출력도 영수증과 작업 checkpoint의 바이트 제한 안에 남긴다", async () => {
+  const { sandbox } = sandboxFixture({ exitCode: 1, output: "실패".repeat(10_000), reason: null });
+  const result = await sandbox.execute(check, archive);
+  assert.equal(result.result, "failed");
+  assert.ok(Buffer.byteLength(result.output, "utf8") <= 8_000);
 });
 
 test("자원 제한을 지원하지 않는 Docker에서는 격리 실행을 시작하지 않는다", async () => {
@@ -109,6 +118,9 @@ test("같은 SHA의 소스를 실행하고 CI를 직접 읽어 비공개 영수�
   const verified = await service.collect(input);
   assert.deepEqual(calls, ["archive", "check", "ci"]);
   assert.equal(JSON.parse(await readFile(join(dataDir, "validation", `${verified.runId}.json`), "utf8")).headSha, sha);
+  const reference = verificationReference(verified);
+  assert.equal(Object.hasOwn(reference, "checks"), false, "대용량 로그를 작업 DB에 복제하지 않는다");
+  assert.deepEqual(await service.restore(reference), verified);
   const review = { verdict: "approve", body: "## 리뷰 결과: 승인\n### 확인한 범위\n정적 점검\n### 작업 맥락\nbackend 입력 계약 확인",
     memory: { implementation: [{ summary: "검증 추가", basis: "observed", evidence: [{ kind: "code", ref: "input.js:1" }] }], decisions: [], validations: [], remainingWork: [] } };
   const augmented = attachVerification(review, verified);
@@ -120,6 +132,8 @@ test("같은 SHA의 소스를 실행하고 CI를 직접 읽어 비공개 영수�
   invented.memory.validations[1].result = "failed";
   assert.throws(() => normalizeReviewResult(invented, { verification: verified }), { code: "review_test_claim_invalid" });
   assert.deepEqual(verificationMemory(verified), augmented.memory.validations);
+  await writeFile(join(dataDir, "validation", `${verified.runId}.json`), "{}");
+  await assert.rejects(service.restore(reference), { code: "verification_receipt_invalid" });
 });
 
 test("CI와 실행 설정이 없으면 통과를 꾸미지 않고 미실행·조회 불가로 남긴다", async (t) => {
