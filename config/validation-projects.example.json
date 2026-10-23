@@ -75,6 +75,18 @@
             "-c",
             "test \"$(tr -d '\\r' < requirements.txt | sha256sum | cut -d ' ' -f 1)\" = \"$(cat /opt/python-lock.sha256)\" || exit 122; python -m pytest -q"
           ]
+        },
+        {
+          "name": "scripts-test",
+          "kind": "test",
+          "image": "reviewbot-scripts:local",
+          "directory": ".",
+          "command": [
+            "/bin/sh",
+            "-c",
+            "test \"$(tr -d '\\r' < scripts/requirements.txt | sha256sum | cut -d ' ' -f 1)\" = \"$(cat /opt/python-lock.sha256)\" || exit 122; python -m pytest scripts/tests -q -rs"
+          ],
+          "timeoutMs": 300000
         }
       ]
     }

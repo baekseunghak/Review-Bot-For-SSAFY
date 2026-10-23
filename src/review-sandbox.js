@@ -81,13 +81,14 @@ export class DockerReviewSandbox {
       await this.run(["rm", "--force", "--volumes", name], { timeoutMs: 15_000 });
     }
     const missingDependency = /No cached version of .+ available for offline mode|No cached resource .+ available for offline mode/.test(outcome.output);
-    const infrastructure = outcome.reason || missingDependency || [null, 120, 121, 122, 125, 126, 127, 137].includes(outcome.exitCode);
+    const missingLibrary = /ImportError: [^\r\n]*cannot open shared object file: No such file or directory/.test(outcome.output);
+    const infrastructure = outcome.reason || missingDependency || missingLibrary || [null, 120, 121, 122, 125, 126, 127, 137].includes(outcome.exitCode);
     const tail = Buffer.from(redactValidationLog(outcome.output), "utf8").subarray(-8_000);
     const firstCharacter = tail.findIndex((byte) => (byte & 0xc0) !== 0x80);
     return { ...base, startedAt, finishedAt: new Date().toISOString(), exitCode: outcome.exitCode,
       result: infrastructure ? "unknown" : outcome.exitCode === 0 ? "passed" : "failed",
       failureKind: infrastructure ? "environment" : outcome.exitCode === 0 ? null : "command",
-      reason: outcome.reason || (missingDependency ? "offline_dependency_missing" : infrastructure ? "container_or_runtime_error" : null),
+      reason: outcome.reason || (missingDependency ? "offline_dependency_missing" : missingLibrary ? "runtime_dependency_missing" : infrastructure ? "container_or_runtime_error" : null),
       output: tail.subarray(Math.max(0, firstCharacter)).toString("utf8") };
   }
 }

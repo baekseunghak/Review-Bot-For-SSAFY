@@ -99,7 +99,10 @@ export class GitlabReviewClient {
       const status = [...String(error?.stderr ?? "").matchAll(/\bHTTP\s+(\d{3})\b/g)].at(-1)?.[1];
       fail("gitlab_request_failed", "GitLab request failed. Check glab authentication and project access.", status ? { httpStatus: Number(status) } : {});
     }
-    if (!value || typeof value !== "object" || value.error || (!Array.isArray(value) && value.message)) {
+    // Successful commit responses contain a `message` field too. HTTP failures
+    // are rejected by glab; only a message-only error envelope is rejected here.
+    if (!value || typeof value !== "object" || value.error
+      || (!Array.isArray(value) && value.message && Object.keys(value).every((key) => key === "message"))) {
       fail("gitlab_request_failed", "GitLab returned an invalid or rejected response.");
     }
     return value;
@@ -218,7 +221,10 @@ export class GitlabReviewClient {
     try {
       data = await this.runImpl("glab", ["api", `projects/${input.projectId}/repository/archive.tar.gz?sha=${sha}`,
         "--hostname", this.host, "--method", "GET"], { shell: false, encoding: "buffer", maxBuffer: 128 * 1024 * 1024, signal });
-    } catch { fail("archive_unavailable", "The reviewed source archive could not be downloaded."); }
+    } catch (error) {
+      const status = [...String(error?.stderr ?? "").matchAll(/\bHTTP\s+(\d{3})\b/g)].at(-1)?.[1];
+      fail("archive_unavailable", "The reviewed source archive could not be downloaded.", status ? { httpStatus: Number(status) } : {});
+    }
     if (!Buffer.isBuffer(data) || data.length > 128 * 1024 * 1024 || data[0] !== 0x1f || data[1] !== 0x8b) {
       fail("archive_invalid", "GitLab did not return a bounded gzip source archive.");
     }

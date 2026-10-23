@@ -72,7 +72,12 @@ export class ReviewVerificationService {
         if (archive.sha !== input.headSha || !Buffer.isBuffer(archive.data)) throw new Error("Archive identity mismatch.");
         result.archiveSha256 = hash(archive.data);
         result.archiveSource = archive.source || "gitlab_archive";
-      } catch (error) { archive = null; result.archiveError = "archive_unavailable"; result.archiveHttpStatus = error.httpStatus ?? null; }
+      } catch (error) {
+        archive = null;
+        result.archiveError = ["gitlab_request_failed", "invalid_gitlab_response", "archive_invalid", "archive_unavailable"].includes(error.code)
+          ? error.code : "archive_unavailable";
+        result.archiveHttpStatus = error.httpStatus ?? null;
+      }
     }
     for (const check of checks) {
       if (signal?.aborted) throw Object.assign(new Error("Validation cancelled."), { code: "runner_cancelled" });
@@ -125,6 +130,7 @@ export function verificationMarkdown(value) {
     if (ci.bridgeError || ci.bridges.length) lines.push("- 하위 파이프라인의 테스트 전체는 확인하지 않았습니다. 브리지 상태와 실행 범위를 별도로 확인해야 합니다.");
   }
   if (!value.checks.length) lines.push(`- 격리 실행: **미실행** (${value.configuration}). 프로젝트별 검증 설정이 필요합니다.`);
+  if (value.archiveError) lines.push(`- 소스 확보 실패: ${value.archiveError}${value.archiveHttpStatus ? ` (HTTP ${value.archiveHttpStatus})` : ""}. CI 유무와 별개로 소스 확보에 실패해 격리 명령을 시작하지 못했습니다.`);
   for (const check of value.checks) {
     const command = check.command ? redactValidationLog(check.command.join(" ")).replace(/[`|<>]/g, "").slice(0, 100) : "명령 미등록";
     lines.push(`- ${check.name} (${check.kind}): **${statusLabel[check.result]}** · \`${command}\` · 종료 코드 ${check.exitCode ?? "없음"}${check.reason ? ` · ${check.reason}` : ""}`);

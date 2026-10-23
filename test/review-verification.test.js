@@ -6,6 +6,7 @@ import test from "node:test";
 import { DockerReviewSandbox, redactValidationLog } from "../src/review-sandbox.js";
 import { ReviewVerificationService, validationProfile, attachVerification, verificationMemory, verificationReference } from "../src/review-verification.js";
 import { normalizeReviewResult } from "../src/review-runner.js";
+import { GitlabReviewClient } from "../src/review-gitlab.js";
 
 const sha = "a".repeat(40), imageId = `sha256:${"b".repeat(64)}`;
 const check = { name: "unit-test", kind: "test", directory: "backend", image: "fixture:local", command: ["node", "test.js"], timeoutMs: 1000 };
@@ -56,6 +57,7 @@ test("실제 명령 실패와 환경 오류를 구분하고 타임아웃·취소
     [{ exitCode: null, output: "", reason: "timeout" }, "unknown", "environment"],
     [{ exitCode: null, output: "", reason: "cancelled" }, "unknown", "environment"],
     [{ exitCode: 1, output: "No cached version of example available for offline mode", reason: null }, "unknown", "environment"],
+    [{ exitCode: 4, output: "ImportError: libexpat.so.1: cannot open shared object file: No such file or directory", reason: null }, "unknown", "environment"],
   ]) {
     const fixture = sandboxFixture(outcome);
     const actual = await fixture.sandbox.execute(check, archive);
@@ -149,4 +151,48 @@ test("CI와 실행 설정이 없으면 통과를 꾸미지 않고 미실행·조
   assert.equal(verified.ci.status, "unavailable");
   assert.deepEqual(verified.checks, []);
   assert.deepEqual(verificationMemory(verified), []);
+});
+
+test("CI가 없거나 조회 실패해도 커밋 메시지가 있는 정상 응답에서 소스를 받아 검사를 실행한다", async (t) => {
+  for (const unavailable of [false, true]) {
+    const dataDir = await mkdtemp(join(tmpdir(), "review-no-ci-"));
+    t.after(() => rm(dataDir, { recursive: true, force: true }));
+    await writeFile(join(dataDir, "validation-projects.json"), JSON.stringify(config()));
+    let executions = 0;
+    const gitlab = new GitlabReviewClient({ host: "gitlab.example.test", allowedProjectIds: [12], runImpl: async (file, args) => {
+      if (args[1].includes("/commits/")) return JSON.stringify({ id: sha, message: "Normal commit message" });
+      if (args[1].includes("archive.tar.gz")) return Buffer.from([0x1f, 0x8b, 0x00]);
+      if (args[1].includes("/pipelines?")) {
+        if (unavailable) throw Object.assign(new Error("private"), { stderr: "HTTP 502" });
+        return "[]";
+      }
+      assert.fail("Unexpected request");
+    } });
+    const service = new ReviewVerificationService({ dataDir, gitlab, sandbox: { async execute(got, source) {
+      executions += 1;
+      assert.equal(source.sha, sha);
+      return { ...got, result: "passed", exitCode: 0, output: "Executed independently of CI" };
+    } } });
+    const verified = await service.collect(input);
+    assert.equal(executions, 1);
+    assert.equal(verified.checks[0].result, "passed");
+    assert.equal(verified.ci.status, unavailable ? "unavailable" : "not_found");
+  }
+});
+
+test("소스 실패 원인·HTTP 상태를 보존하며 검사를 실행한 것으로 기록하지 않는다", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "review-archive-failure-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await writeFile(join(dataDir, "validation-projects.json"), JSON.stringify(config()));
+  const service = new ReviewVerificationService({ dataDir, gitlab: { host: "gitlab.example.test",
+    async archive() { throw Object.assign(new Error("private"), { code: "gitlab_request_failed", httpStatus: 502 }); },
+    async readCi() { return { status: "not_found", pipeline: null }; },
+  }, sandbox: { execute() { assert.fail("Source unavailable"); } } });
+  const verified = await service.collect(input);
+  assert.equal(verified.archiveError, "gitlab_request_failed");
+  assert.equal(verified.archiveHttpStatus, 502);
+  assert.equal(verified.checks[0].result, "not_run");
+  const body = attachVerification({ body: "Reviewed", memory: { validations: [] } }, verified).body;
+  assert.match(body, /소스 확보 실패: gitlab_request_failed \(HTTP 502\)/);
+  assert.doesNotMatch(body, /private/);
 });

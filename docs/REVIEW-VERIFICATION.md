@@ -2,6 +2,8 @@
 
 자동 리뷰는 작성자의 테스트 통과 보고와 별도로 검토 SHA의 CI 결과를 조회하고, 운영자가 등록한 테스트·빌드·린트 명령을 Docker Linux 컨테이너에서 실행합니다. 모델에는 실행 권한을 주지 않습니다. 모델은 수집된 코드·요구사항과 검증 결과를 함께 읽습니다.
 
+격리 실행은 CI 파이프라인·CI 아티팩트에 의존하지 않습니다. 파이프라인이 없거나 CI 조회에 실패해도 검토 SHA의 저장소 아카이브로 등록 명령을 실행합니다. 소스 확보 자체에 실패한 경우에는 실행하지 못한 원인과 확인 가능한 HTTP 상태를 따로 기록합니다.
+
 ## 처리 순서
 
 1. MR의 최신 SHA와 변경 자료·팀 맥락을 고정합니다.
@@ -112,6 +114,20 @@ docker build -t reviewbot-python:local C:/private/reviewbot-images/python
 ```
 
 예제는 Python 3.12, binary wheel만 설치합니다. 요구 파일 해시(줄바꿈 차이 정규화)가 다르면 실행을 중단합니다. 테스트 의존성도 사전에 목록에 있어야 합니다. 소스 빌드가 필요한 패키지나 다른 Python 버전은 운영자가 별도 이미지를 준비하세요.
+
+### 별도 데이터 스크립트 테스트
+
+`screening/tests`와 `scripts/tests`는 서로 다른 검사입니다. 데이터 적재·다운로드 스크립트를 사용하는 프로젝트는 `scripts-test`도 등록하세요. 예제에는 `scripts/requirements.txt`와 pytest, rasterio 로딩에 필요한 `libexpat1`을 설치하는 별도 이미지가 포함돼 있습니다.
+
+```powershell
+New-Item -ItemType Directory -Force C:/private/reviewbot-images/scripts
+Copy-Item -LiteralPath config/validation-images/scripts.Dockerfile -Destination C:/private/reviewbot-images/scripts/Dockerfile
+Copy-Item -LiteralPath C:/work/my-project/scripts/requirements.txt -Destination C:/private/reviewbot-images/scripts/requirements.txt
+
+docker build -t reviewbot-scripts:local C:/private/reviewbot-images/scripts
+```
+
+설정 예제의 `scripts-test`는 저장소 루트에서 `python -m pytest scripts/tests -q -rs`를 실행합니다. `-rs`로 건너뛴 검사 사유도 영수증 로그에 남깁니다. PostGIS 같은 별도 서비스가 없어 건너뛴 검사는 통과한 통합 테스트로 보고하지 않습니다. 프로젝트마다 의존성·pytest 버전과 경로를 확인하고, 해당 디렉터리가 없으면 예제 검사를 제거하세요.
 
 ## 실제 MR에서 검증만 실행
 

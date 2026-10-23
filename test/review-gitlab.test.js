@@ -120,7 +120,7 @@ test("소스 아카이브는 SHA를 검증한 뒤 바이너리로 받아 호스�
   const calls = [];
   const client = new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: async (file, args, options) => {
     calls.push({ args, options });
-    if (args[1].includes("/commits/")) return JSON.stringify({ id: headSha });
+    if (args[1].includes("/commits/")) return JSON.stringify({ id: headSha, message: "Implement data loading\n", title: "Implement data loading" });
     assert.equal(options.encoding, "buffer");
     return Buffer.from([0x1f, 0x8b, 0x00]);
   } });
@@ -129,6 +129,24 @@ test("소스 아카이브는 SHA를 검증한 뒤 바이너리로 받아 호스�
   assert.equal(result.sha, headSha);
   assert.match(calls[1].args[1], new RegExp(`archive.tar.gz\\?sha=${headSha}$`));
   await assert.rejects(client.archive({ ...input, headSha: "main" }));
+});
+
+test("아카이브 HTTP 실패는 원문 인증정보 없이 상태만 보존하고 다른 SHA는 받지 않는다", async () => {
+  for (const returnedSha of [headSha, baseSha]) {
+    let downloads = 0;
+    const client = new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: async (file, args) => {
+      if (args[1].includes("/commits/")) return JSON.stringify({ id: returnedSha, message: "Commit message" });
+      downloads += 1;
+      throw Object.assign(new Error("secret"), { stderr: "HTTP 502 token=private" });
+    } });
+    await assert.rejects(client.archive({ ...input, headSha }), (error) => {
+      assert.equal(error.code, returnedSha === headSha ? "archive_unavailable" : "invalid_gitlab_response");
+      assert.equal(error.httpStatus, returnedSha === headSha ? 502 : undefined);
+      assert.doesNotMatch(JSON.stringify(error), /private|secret/);
+      return true;
+    });
+    assert.equal(downloads, returnedSha === headSha ? 1 : 0);
+  }
 });
 
 test("실제 MR 신원·SHA·전체 diff와 변경 전후 파일·설명·댓글을 수집한다", async () => {
