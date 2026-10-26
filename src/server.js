@@ -7,6 +7,8 @@ import { TeamContextService } from "./team-context.js";
 import { prepareMrContext } from "./gitlab-context.js";
 import { workerSettings } from "./review-worker-config.js";
 import { createConfiguredReviewWorker } from "./review-worker.js";
+import { GitlabReviewClient } from "./review-gitlab.js";
+import { syncReviewComments } from "./review-comment-sync.js";
 import pkg from "../package.json" with { type: "json" };
 
 const service = new MattermostService();
@@ -123,8 +125,14 @@ register("team_sync", {
   inputSchema: z.object({}), annotations: refresh,
 }, () => teamContext.syncMembers());
 
+register("team_review_comments_sync", {
+  description: "Refresh private per-person review observations from complete comments of MRs already recorded in the webhook inbox. Applies the operator's excluded-user policy. Replaces edited/deleted comments, preserves prior data on failure, and never creates review requests or posts comments/notifications. Follow nextOffset for all MRs.",
+  inputSchema: z.object({ limit: z.int().min(1).max(100).optional(), offset: z.int().min(0).optional() }), annotations: refresh,
+}, ({ limit, offset }) => syncReviewComments({ inbox: reviewInbox, contextService: teamContext,
+  gitlab: new GitlabReviewClient({ host: automaticSettings.host, allowedProjectIds: automaticSettings.projectIds }), limit, offset }));
+
 register("team_member_context", {
-  description: "Read one member's stored Jira work and responsibilities with source timestamps. Does not refresh. Follow nextOffset for omitted work; check sync state before using a snapshot.",
+  description: "Read one member's stored Jira work, responsibilities and evidence-linked MR review observations with source timestamps. Does not refresh. Follow nextOffset for omitted work; check sync state before using a snapshot.",
   inputSchema: z.object({ member_id: z.string().min(1).max(96), offset: z.int().min(0).optional().default(0), limit: z.int().min(1).max(100).optional().default(20) }), annotations: readOnly,
 }, ({ member_id, offset, limit }) => teamContext.memberContext({ memberId: member_id, offset, limit }));
 

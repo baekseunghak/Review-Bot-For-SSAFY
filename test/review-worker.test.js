@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -169,6 +169,25 @@ function fixture(t) {
     artifact(requestId = 1) { return JSON.parse(inbox.db.prepare("SELECT artifact FROM review_executions WHERE request_id = ?").get(requestId).artifact); },
   };
 }
+
+test("자동 worker는 수집한 사람의 리뷰 댓글을 저장한 뒤 같은 실행의 모델 관점에 전달한다", async (t) => {
+  const f = fixture(t);
+  writeFileSync(join(f.contextService.dataDir, "reviewer-comments-policy.json"), JSON.stringify({ schemaVersion: 1, enabled: true, excludedUserIds: [8], excludedUsernames: [] }));
+  f.contextService.upsertMember({ id: "human-reviewer", displayName: "검토자", gitlabUsername: "human.reviewer", gitlabUserId: 9,
+    jiraAccountId: "fixture:9", areas: ["API"], paths: ["src"], reviewFocus: ["응답 계약"] });
+  f.notes.push({ id: 55, author: { id: 9, username: "human.reviewer" }, system: false,
+    body: "API의 빈 결과 처리와 회귀 테스트를 추가해 주세요.", created_at: INITIAL_TIME, updated_at: INITIAL_TIME });
+  f.hooks.review = (input) => {
+    const view = input.context.perspectives.find((item) => item.memberId === "human-reviewer");
+    assert.equal(view.reviewerObservations.commentCount, 1);
+    assert.equal(view.reviewerObservations.examples[0].url, `${MR_URL}#note_55`);
+    assert.equal(input.context.perspectives.find((item) => item.memberId === "dev-one").reviewerObservations, null);
+  };
+  f.send();
+  assert.equal((await f.makeWorker().runOnce()).status, "completed");
+  assert.equal(f.calls.reviews.length, 1);
+  assert.equal(f.calls.notifications.length, 1);
+});
 
 test("웹훅 요청은 실제 코드 검토·누적 기록·MR 댓글·Mattermost까지 이어지고 동일 SHA는 반복하지 않는다", async (t) => {
   const f = fixture(t);

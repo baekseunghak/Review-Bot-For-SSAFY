@@ -74,6 +74,7 @@ export class ReviewWorker {
           checkpoint("reviewing", { review: null, completion: null, comment: null });
           const changes = await this.gitlab.readReview(job);
           current();
+          this.contextService.captureReviewComments?.(changes);
           // Validate notification setup before spending a review run or publishing anything.
           this.notifier.prepare({ ...changes, issueKeys: changes.issueKeys, verdict: "approve", commentUrl: changes.mrUrl });
           bundle = await this.contextService.prepareReview({ mrUrl: changes.mrUrl, headSha: changes.headSha,

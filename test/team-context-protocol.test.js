@@ -181,7 +181,7 @@ test("stdio completion persists bound memory and returns it through the history 
     contextService = null;
     mcp = await start(dataDir, { headSha });
     const listed = await mcp.request("tools/list");
-    assert.equal(listed.result.tools.length, 34);
+    assert.equal(listed.result.tools.length, 35);
     assert.ok(listed.result.tools.some((tool) => tool.name === "review_context_prepare" && tool.inputSchema.properties.jira_keys));
     assert.equal((await mcp.tool("review_history_list")).data.total, 0);
     const memory = {

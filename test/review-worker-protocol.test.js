@@ -235,7 +235,7 @@ for (const provider of ["claude", "codex"]) test(`authenticated webhook drives t
     const effectsPath = join(dataDir, "effects.json");
     mcp = await startMcp(dataDir, effectsPath, provider);
     const listed = await mcp.request("tools/list");
-    assert.equal(listed.result.tools.length, 34);
+    assert.equal(listed.result.tools.length, 35);
     for (const name of ["review_worker_status", "review_job_retry"]) assert.ok(listed.result.tools.some((tool) => tool.name === name));
     let status;
     for (let attempt = 0; attempt < 100; attempt++) {

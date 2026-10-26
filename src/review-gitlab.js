@@ -231,7 +231,25 @@ export class GitlabReviewClient {
     return { data, sha, sha256: hash(data), source: "gitlab_archive" };
   }
 
+  async readComments(input) {
+    const notesObservedAt = new Date().toISOString();
+    const endpoint = this.address(input);
+    const snapshot = this.snapshot(await this.api(endpoint), input);
+    let bytes = 0;
+    const notes = await this.pages(`${endpoint}/notes?sort=asc&order_by=created_at`, { onPage: (items) => {
+      bytes += Buffer.byteLength(JSON.stringify(items), "utf8");
+      if (bytes > this.maxContextBytes) fail("context_too_large", "MR comments exceed the complete collection limit.");
+    } });
+    return { ...snapshot, notesComplete: true, notesObservedAt,
+      notes: notes.filter((note) => !note.system).map((note) => {
+        if (!Number.isSafeInteger(note.id) || note.id < 1 || typeof note.body !== "string") fail("invalid_gitlab_response", "GitLab MR comment is invalid.");
+        return { id: note.id, body: note.body, author: { id: note.author?.id, username: note.author?.username, bot: note.author?.bot === true },
+          createdAt: note.created_at ?? null, updatedAt: note.updated_at ?? null };
+      }) };
+  }
+
   async readReview(input) {
+    const notesObservedAt = new Date().toISOString();
     const endpoint = this.address(input);
     const mr = await this.api(endpoint);
     const snapshot = this.snapshot(mr, input);
@@ -252,7 +270,8 @@ export class GitlabReviewClient {
       for (const note of items) {
         if (!note || note.system) continue;
         if (!Number.isSafeInteger(note.id) || typeof note.body !== "string") fail("invalid_gitlab_response", "GitLab MR comment is invalid.");
-        const normalized = { id: note.id, body: note.body, author: { id: note.author?.id, username: note.author?.username }, createdAt: note.created_at ?? null };
+        const normalized = { id: note.id, body: note.body, author: { id: note.author?.id, username: note.author?.username, bot: note.author?.bot === true },
+          createdAt: note.created_at ?? null, updatedAt: note.updated_at ?? null };
         consume(normalized);
         notes.push(normalized);
       }
@@ -339,7 +358,7 @@ export class GitlabReviewClient {
     if (!files.length) fail("no_reviewable_text", "MR contains only excluded images and has no reviewable text. Image contents require a separate review.");
     return {
       ...snapshot, baseSha: baseSha.toLowerCase(), startSha: startSha.toLowerCase(), title, description,
-      notes, files, excludedImages, changedPaths: [...changedPaths],
+      notes, notesComplete: true, notesObservedAt, files, excludedImages, changedPaths: [...changedPaths],
       issueKeys: extractIssueKeys(title, description, mr.source_branch),
       mrSource: { title, description, descriptionTruncated: false }, contextBytes: bytes,
     };

@@ -60,6 +60,20 @@ test("description mention, comment mention and reviewer assignment each queue re
   assert.equal(instance.status().pending, 5);
 });
 
+test("댓글 동기화 목록은 호출 이력만 중복 없이 페이지로 주고 허용 프로젝트를 지킨다", (t) => {
+  const { instance, directory } = inbox(t);
+  send(instance);
+  send(instance, mr({ last_commit: { id: B }, updated_at: T2 }));
+  send(instance, note("@reviewer please review", {}, { iid: 8 }));
+  const first = instance.commentSyncTargets({ limit: 1 });
+  assert.equal(first.total, 2);
+  assert.deepEqual(first.targets, [{ projectId: 10, mrIid: 7 }]);
+  assert.equal(first.nextOffset, 1);
+  assert.deepEqual(instance.commentSyncTargets({ offset: 1 }).targets, [{ projectId: 10, mrIid: 8 }]);
+  const foreign = new ReviewInbox({ dataDir: directory, projectIds: [20] });
+  try { assert.equal(foreign.commentSyncTargets().total, 0); } finally { foreign.close(); }
+});
+
 test("mentions in code, quotes, addresses, URLs, and different usernames do not trigger", (t) => {
   const { instance } = inbox(t);
   const excluded = [

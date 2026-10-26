@@ -31,7 +31,7 @@ GitLab MR의 변경 내용과 팀원의 Jira 작업 맥락을 함께 검토하�
 
 | 기능 | 현재 상태 |
 |---|---|
-| 로컬 stdio MCP | 구현됨. 도구 34개 제공 |
+| 로컬 stdio MCP | 구현됨. 도구 35개 제공 |
 | Mattermost 웹훅·채널·사람·템플릿 관리와 메시지 전송 | 구현됨. 실제 전송에는 별도 설정 필요 |
 | GitLab 웹훅 수신·인증·중복 제거·SQLite 수신함 | 구현됨. 별도 수신 프로세스 실행 필요 |
 | MR 설명 멘션·댓글 멘션·리뷰어 지정 감지 | 구현됨. 지정한 계정과 허용 프로젝트에 적용 |
@@ -127,7 +127,7 @@ npm run smoke:review
 | 명령 | 확인하는 것 |
 |---|---|
 | `npm test` | 원본 기능, Jira·팀 저장소·주간 요약·리뷰 단계, 로컬 HTTP/stdio 통합 |
-| `npm run smoke` | 별도 stdio 프로세스의 도구 34개와 기본 호출 |
+| `npm run smoke` | 별도 stdio 프로세스의 도구 35개와 기본 호출 |
 | `npm run smoke:review` | 인증된 가상 웹훅 → SQLite → stdio 조회, 중복과 새 커밋 |
 
 테스트는 임시 데이터와 모의 응답을 사용합니다. 운영 GitLab·Jira·Mattermost에 댓글·메시지를 보내지 않습니다. Windows에서 파일 심볼릭 링크 권한이 없으면 해당 검사 1개가 생략될 수 있습니다.
@@ -773,7 +773,7 @@ CLI를 직접 호출할 때 `prepare`가 반환한 `worktreePath`로 이동한 �
 
 ## 15. 전체 MCP 도구
 
-현재 총 34개입니다. 아래는 도구 이름이며 CLI 명령은 아닙니다.
+현재 총 35개입니다. 아래는 도구 이름이며 CLI 명령은 아닙니다.
 
 | 영역 | 도구 |
 |---|---|
@@ -781,7 +781,7 @@ CLI를 직접 호출할 때 `prepare`가 반환한 `worktreePath`로 이동한 �
 | GitLab 수신함 | `review_inbox_status`, `review_pending_list` |
 | 자동 리뷰 운영 | `review_worker_status`, `review_job_retry` |
 | 팀 프로필 | `team_member_upsert`, `team_member_list` |
-| Jira·주간 요약 | `team_sync`, `team_member_context`, `team_weekly_summary` |
+| Jira·주간 요약 | `team_sync`, `team_review_comments_sync`, `team_member_context`, `team_weekly_summary` |
 | MR 최신 맥락 | `review_context_prepare` |
 | 비공개 리뷰 기록 | `review_context_complete`, `review_history_list` |
 | Mattermost 웹훅 | `webhook_create`, `webhook_list`, `webhook_update`, `webhook_delete` |
@@ -791,7 +791,7 @@ CLI를 직접 호출할 때 `prepare`가 반환한 `worktreePath`로 이동한 �
 | 메시지 템플릿 | `convention_create`, `convention_list`, `convention_update`, `convention_delete` |
 | 미리보기·전송 | `message_preview`, `message_send`, `message_send_dm` |
 
-`team_sync`, `team_weekly_summary`, `review_context_prepare`는 외부 자료를 읽고 로컬 파일을 갱신합니다. `review_context_complete`는 GitLab SHA를 읽어 확인하고 로컬 리뷰 기록을 저장하며, `review_history_list`는 저장된 기록을 조회합니다. `message_send`, `message_send_dm`은 실제 외부 메시지를 보냅니다. `review_worker_status`는 원문 없이 처리 상태를 반환합니다. `review_job_retry`는 최종 실패한 작업을 다시 대기시키므로 worker가 켜져 있으면 외부 게시·전송을 재개할 수 있습니다.
+`team_sync`, `team_review_comments_sync`, `team_weekly_summary`, `review_context_prepare`는 외부 자료를 읽고 로컬 파일을 갱신합니다. `review_context_complete`는 GitLab SHA를 읽어 확인하고 로컬 리뷰 기록을 저장하며, `review_history_list`는 저장된 기록을 조회합니다. `message_send`, `message_send_dm`은 실제 외부 메시지를 보냅니다. `review_worker_status`는 원문 없이 처리 상태를 반환합니다. `review_job_retry`는 최종 실패한 작업을 다시 대기시키므로 worker가 켜져 있으면 외부 게시·전송을 재개할 수 있습니다.
 
 ## 16. 저장 위치와 백업
 
@@ -917,3 +917,5 @@ claude mcp remove reviewbot --scope user
 원본 출처는 위 MMP 링크를 유지합니다. `skills/mr-review/checklists/LICENSE-open-code-review.txt`는 가져온 체크리스트의 별도 Apache 2.0 라이선스이며 저장소 전체의 라이선스를 뜻하지 않습니다. 루트 라이선스와 원본 사용 조건을 확인하기 전에는 전체 프로젝트에 MIT 등의 배지를 임의로 붙이지 않습니다.
 
 추가 기록은 [자동 리뷰 설치·복구](docs/AUTO-REVIEW.md), [팀 작업 맥락](docs/TEAM-CONTEXT.md), [로컬 수신함](docs/LOCAL-REVIEW.md), [설계 기록](docs/CONTEXT.md), [기존 하네스](docs/review-harness.md)에 있습니다. 실제 계정 연결·HTTPS 수신·댓글 게시·Mattermost 도착·운영 환경의 최초 동기화 시간은 각 설치 환경에서 검증해야 합니다.
+
+사용자별 리뷰 댓글 관점은 별도 비공개 정책으로 활성화합니다. [MR 댓글 수집·제외 계정·초기 동기화·반영 범위](docs/TEAM-CONTEXT.md#mr-댓글에서-관찰한-리뷰-관점)를 참고하세요. 기존 담당 영역과 명시적 리뷰 지침은 유지합니다.

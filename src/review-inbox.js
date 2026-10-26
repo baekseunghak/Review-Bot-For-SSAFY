@@ -481,6 +481,14 @@ export class ReviewInbox {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
+  commentSyncTargets({ limit = 25, offset = 0 } = {}) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0) throw new UserError("Invalid comment sync page.");
+    const targets = this.db.prepare("SELECT DISTINCT project_id, mr_iid FROM review_requests ORDER BY project_id, mr_iid")
+      .all().filter((row) => this.projectIds.has(row.project_id)).map((row) => ({ projectId: row.project_id, mrIid: row.mr_iid }));
+    return { targets: targets.slice(offset, offset + limit), total: targets.length,
+      nextOffset: offset + limit < targets.length ? offset + limit : null };
+  }
+
   workerStatus({ limit = 20 } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new UserError("limit must be an integer between 1 and 100.");
     const counts = { running: 0, retry: 0, completed: 0, failed: 0 };
