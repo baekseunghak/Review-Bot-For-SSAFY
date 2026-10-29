@@ -46,7 +46,7 @@ export function reviewCommentTopics(body) {
 
 export function reviewerCommentSnapshot(source, members, policy) {
   if (!source.notesComplete || !Array.isArray(source.notes) || !validId(source.projectId) || !validId(source.mrIid)
-    || !stamp(source.notesObservedAt) || !/^(?:[a-f\d]{40}|[a-f\d]{64})$/.test(source.headSha ?? "")) fail();
+    || !stamp(source.notesObservedAt) || (source.headSha !== null && !/^(?:[a-f\d]{40}|[a-f\d]{64})$/.test(source.headSha ?? ""))) fail();
   const notes = [];
   const seen = new Set();
   for (const note of source.notes) {

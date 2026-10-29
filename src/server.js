@@ -9,6 +9,7 @@ import { workerSettings } from "./review-worker-config.js";
 import { createConfiguredReviewWorker } from "./review-worker.js";
 import { GitlabReviewClient } from "./review-gitlab.js";
 import { syncReviewComments } from "./review-comment-sync.js";
+import { StartupContextSync } from "./startup-context-sync.js";
 import pkg from "../package.json" with { type: "json" };
 
 const service = new MattermostService();
@@ -17,9 +18,13 @@ try { automaticSettings = workerSettings(); }
 catch { automaticSettings = { enabled: false, ready: false, missing: [], projectIds: [], error: "invalid_worker_settings" }; }
 const reviewInbox = new ReviewInbox({ dataDir: service.dataDir, projectIds: automaticSettings.projectIds });
 const teamContext = new TeamContextService({ dataDir: service.dataDir });
-const stopWeeklyScheduler = teamContext.startWeeklyScheduler();
+let stopWeeklyScheduler = () => {};
 const automaticWorker = automaticSettings.ready ? createConfiguredReviewWorker({ inbox: reviewInbox, contextService: teamContext, mattermost: service, settings: automaticSettings }) : null;
-automaticWorker?.start();
+const beginOperations = () => { stopWeeklyScheduler = teamContext.startWeeklyScheduler(); automaticWorker?.start(); };
+const startupSync = automaticSettings.startupSync ? new StartupContextSync({ contextService: teamContext,
+  gitlab: new GitlabReviewClient({ host: automaticSettings.host, allowedProjectIds: automaticSettings.projectIds }),
+  projectIds: automaticSettings.projectIds, onReady: beginOperations }) : null;
+if (startupSync) startupSync.start(); else beginOperations();
 const server = new McpServer({ name: "mmp", version: pkg.version });
 
 const name = z.string().trim().min(1).max(64).regex(/^[\p{L}\p{N}](?:[\p{L}\p{N} ._-]*[\p{L}\p{N}._-])?$/u);
@@ -91,6 +96,7 @@ register("review_worker_status", {
   description: "Show automatic-review configuration readiness and durable job stages/errors without private review bodies. The enabled worker processes authenticated webhook requests through code review, memory, MR comment and author Mattermost DM. It never approves or merges an MR. Notification delivery marked unknown needs an explicit retry choice.",
   inputSchema: z.object({ limit: z.int().min(1).max(100).optional().default(20) }), annotations: readOnly,
 }, ({ limit }) => ({ enabled: automaticSettings.enabled, configured: automaticSettings.ready,
+  startupSync: startupSync?.status() ?? { status: "disabled" },
   provider: automaticSettings.provider ?? null, model: automaticSettings.model ?? null,
   missing: automaticSettings.missing, ...(automaticSettings.error ? { error: automaticSettings.error } : {}),
   active: Boolean(automaticWorker?.task), lastResult: automaticWorker?.lastResult ?? null, ...reviewInbox.workerStatus({ limit }) }));
@@ -366,6 +372,7 @@ let stopping = false;
 async function shutdown() {
   if (stopping) return;
   stopping = true;
+  await startupSync?.stop();
   stopWeeklyScheduler();
   await automaticWorker?.stop();
   teamContext.close(); reviewInbox.close(); service.close(); process.exit(0);

@@ -42,6 +42,7 @@ async function installWorkerFixture() {
     const endpoint = args[1];
     const method = args.includes("--method") ? args[args.indexOf("--method") + 1] : "GET";
     if (endpoint.startsWith(`projects/10/pipelines?sha=${sha}&`) && method === "GET") return [];
+    if (endpoint.startsWith("projects/10/merge_requests?scope=all&state=all&") && method === "GET") return [{ project_id: 10, iid: 7 }];
     if (endpoint === "user" && method === "GET") return { id: 999, username: "reviewbot" };
     if (["projects/10/merge_requests/7", "projects/team%2Frepo/merge_requests/7"].includes(endpoint) && method === "GET") return mr;
     if (endpoint.startsWith("projects/10/merge_requests/7/notes?") && method === "GET") return effects.notes;
@@ -109,6 +110,7 @@ async function installWorkerFixture() {
         if (data.changes.files.length !== 1 || data.changes.excludedImages?.length !== 1
           || data.changes.excludedImages[0].newPath !== "docs/screen.png"
           || /iVBORw0KGgo/.test(input)) return unexpected("Image scope metadata");
+        if (data.context.projectActivity?.records?.[0]?.mrUrl !== mrUrl) return unexpected("Startup context was not passed to the model");
         effects.modelCalls++;
         effects.modelEvidence = { headSha: data.context.headSha, perspectives: data.context.perspectives.length, jiraKeys: data.context.relatedIssues.map((entry) => entry.key) };
         save();
@@ -162,7 +164,7 @@ async function startMcp(dataDir, effectsPath, provider) {
   const env = { MATTERMOST_MCP_DATA_DIR: dataDir, REVIEWBOT_AUTO_REVIEW: "1", REVIEWBOT_GITLAB_HOST: "gitlab.example.test",
     REVIEWBOT_GITLAB_PROJECT_IDS: "10", REVIEWBOT_MATTERMOST_CHANNEL: "fixture-channel", REVIEWBOT_WORKER_INTERVAL_MS: "1000",
     REVIEWBOT_JIRA_BASE_URL: "https://jira.example.test", REVIEWBOT_JIRA_EMAIL: "fixture@example.test", REVIEWBOT_JIRA_API_TOKEN: "fixture-token",
-    REVIEWBOT_JIRA_PROJECT_KEY: "TEST", REVIEWBOT_TEST_EFFECTS: effectsPath, REVIEWBOT_REVIEW_PROVIDER: provider };
+    REVIEWBOT_JIRA_PROJECT_KEY: "TEST", REVIEWBOT_STARTUP_SYNC: "1", REVIEWBOT_TEST_EFFECTS: effectsPath, REVIEWBOT_REVIEW_PROVIDER: provider };
   for (const key of ["SystemRoot", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP", "ComSpec"]) if (process.env[key] !== undefined) env[key] = process.env[key];
   const preload = `data:text/javascript,${encodeURIComponent(`await (${installWorkerFixture.toString()})();`)}`;
   const child = spawn(process.execPath, ["--import", preload, join(root, "src/server.js")], { cwd: root, env, stdio: ["pipe", "pipe", "pipe"] });
@@ -248,6 +250,8 @@ for (const provider of ["claude", "codex"]) test(`authenticated webhook drives t
       await delay(50);
     }
     assert.equal(status.data.counts.completed, 1, JSON.stringify(status.data));
+    assert.equal(status.data.startupSync.ready, true);
+    assert.equal(status.data.startupSync.status, "done");
     const effects = JSON.parse(readFileSync(effectsPath, "utf8"));
     assert.deepEqual([effects.modelCalls, effects.commentPosts, effects.mmPosts], [1, 1, 1]);
     assert.equal(effects.rawDiffReads, 1);

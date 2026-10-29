@@ -11,6 +11,7 @@ function integer(value, fallback, min, max, name) {
 
 export function workerSettings(env = process.env) {
   if (![undefined, "", "0", "1"].includes(env.REVIEWBOT_AUTO_REVIEW)) throw new UserError("REVIEWBOT_AUTO_REVIEW must be 0 or 1.");
+  if (![undefined, "", "0", "1"].includes(env.REVIEWBOT_STARTUP_SYNC)) throw new UserError("REVIEWBOT_STARTUP_SYNC must be 0 or 1.");
   const { dataDir, projectIds } = reviewSettings(env);
   const enabled = env.REVIEWBOT_AUTO_REVIEW === "1";
   const host = env.REVIEWBOT_GITLAB_HOST?.trim() || "";
@@ -34,7 +35,9 @@ export function workerSettings(env = process.env) {
   const validationConfigPath = env.REVIEWBOT_VALIDATION_CONFIG?.trim() || null;
   if (validationConfigPath && ((!isAbsolute(validationConfigPath) && !win32.isAbsolute(validationConfigPath))
     || /[\x00-\x1f]/.test(validationConfigPath) || validationConfigPath.length > 2048)) throw new UserError("Invalid REVIEWBOT_VALIDATION_CONFIG.");
-  return { dataDir, enabled, ready: enabled && !missing.length, missing, host: host.toLowerCase(), projectIds, channelName, provider, command, model, validationConfigPath,
+  const startupSync = env.REVIEWBOT_STARTUP_SYNC === "1";
+  if (startupSync && (!host || !projectIds.length)) throw new UserError("Startup sync requires the GitLab host and project allowlist.");
+  return { dataDir, enabled, startupSync, ready: enabled && !missing.length, missing, host: host.toLowerCase(), projectIds, channelName, provider, command, model, validationConfigPath,
     intervalMs: integer(env.REVIEWBOT_WORKER_INTERVAL_MS, 5000, 1000, 300_000, "REVIEWBOT_WORKER_INTERVAL_MS"),
     timeoutMs: integer(env.REVIEWBOT_REVIEW_TIMEOUT_MS, 180_000, 1000, 900_000, "REVIEWBOT_REVIEW_TIMEOUT_MS") };
 }

@@ -199,6 +199,7 @@ macOS·Linux에서는 데이터 경로를 `/home/you/.reviewbot/team-a`처럼 �
 | `REVIEWBOT_WEBHOOK_SECRET` | 웹훅 수신 | GitLab Secret token과 동일한 16~512자 공백 없는 ASCII 문자열 |
 | `REVIEWBOT_PORT` | 선택 | 로컬 수신 포트. 기본 `8765` |
 | `REVIEWBOT_AUTO_REVIEW` | 자동 리뷰 사용 | `1`일 때만 worker 시작. 기본 비활성 |
+| `REVIEWBOT_STARTUP_SYNC` | 재시작 맥락 복구 | `1`이면 전체 MR·댓글·Jira를 대조하고 성공 시각 저장 후 자동 리뷰 시작. 기본 `0`. [설정·상태 확인](docs/TEAM-CONTEXT.md#재시작-시-꺼진-동안의-맥락-복구) |
 | `REVIEWBOT_GITLAB_HOST` | 자동 리뷰 사용 | `gitlab.example.com` 같은 호스트명과 선택 포트. `https://`나 프로젝트 경로 제외 |
 | `REVIEWBOT_MATTERMOST_CHANNEL` | 자동 리뷰 사용 | 등록한 논리 채널 이름. 작성자 DM에 사용할 웹훅을 찾는 출처 |
 | `REVIEWBOT_REVIEW_PROVIDER` | 자동 리뷰 선택 | `codex` 또는 `claude`만 허용. 새 설정 예시는 `codex`, 미설정·빈 값은 기존 호환을 위해 `claude` |

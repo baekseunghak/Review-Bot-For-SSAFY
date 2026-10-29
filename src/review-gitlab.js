@@ -234,7 +234,18 @@ export class GitlabReviewClient {
   async readComments(input) {
     const notesObservedAt = new Date().toISOString();
     const endpoint = this.address(input);
-    const snapshot = this.snapshot(await this.api(endpoint), input);
+    const mr = await this.api(endpoint);
+    const mrUrl = this.mrUrl(mr, input);
+    if (!Number.isSafeInteger(mr.author?.id) || mr.author.id < 1
+      || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(mr.author?.username ?? "")
+      || !["opened", "closed", "locked", "merged"].includes(mr.state)) fail("invalid_gitlab_response", "GitLab MR metadata is invalid.");
+    // Historical comments remain readable after GitLab removes a closed MR's head.
+    const candidate = mr.sha ?? mr.diff_refs?.head_sha;
+    const snapshot = { projectId: input.projectId, mrIid: input.mrIid, mrUrl, state: mr.state,
+      headSha: SHA.test(candidate ?? "") ? candidate.toLowerCase() : null,
+      author: { id: mr.author.id, username: mr.author.username }, title: String(mr.title ?? ""),
+      description: String(mr.description ?? ""), sourceBranch: String(mr.source_branch ?? ""),
+      targetBranch: String(mr.target_branch ?? ""), createdAt: mr.created_at ?? null, updatedAt: mr.updated_at ?? null };
     let bytes = 0;
     const notes = await this.pages(`${endpoint}/notes?sort=asc&order_by=created_at`, { onPage: (items) => {
       bytes += Buffer.byteLength(JSON.stringify(items), "utf8");
@@ -246,6 +257,20 @@ export class GitlabReviewClient {
         return { id: note.id, body: note.body, author: { id: note.author?.id, username: note.author?.username, bot: note.author?.bot === true },
           createdAt: note.created_at ?? null, updatedAt: note.updated_at ?? null };
       }) };
+  }
+
+  async listProjectMrs(projectId) {
+    integer(projectId, "projectId");
+    if (!this.allowedProjectIds.has(projectId)) fail("project_not_allowed", "GitLab project is not allowed.");
+    const items = await this.pages(`projects/${projectId}/merge_requests?scope=all&state=all&order_by=created_at&sort=asc`);
+    const seen = new Set();
+    for (const item of items) {
+      if (item.project_id !== projectId || !Number.isSafeInteger(item.iid) || item.iid < 1 || seen.has(item.iid)) {
+        fail("invalid_gitlab_response", "GitLab MR inventory is incomplete or inconsistent.");
+      }
+      seen.add(item.iid);
+    }
+    return items.map((item) => ({ projectId, mrIid: item.iid }));
   }
 
   async readReview(input) {

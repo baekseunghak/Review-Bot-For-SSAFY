@@ -220,6 +220,15 @@ export class TeamContextStore {
         observed_at TEXT NOT NULL,
         snapshot_json TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS team_project_mr_contexts (
+        mr_url TEXT PRIMARY KEY, content_hash TEXT NOT NULL,
+        observed_at TEXT NOT NULL, snapshot_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS team_startup_sync (
+        scope TEXT PRIMARY KEY, last_success_at TEXT, completed_at TEXT,
+        status TEXT NOT NULL, owner_token TEXT, lease_until INTEGER NOT NULL,
+        retry_at INTEGER NOT NULL, error_code TEXT, summary_json TEXT
+      );
     `);
     try { chmodSync(database, 0o600); } catch { /* Windows uses inherited ACLs. */ }
   }
@@ -315,7 +324,7 @@ export class TeamContextStore {
   saveReviewCommentSource(source, policy) {
     const value = jsonObject(source);
     value.mrUrl = mrAddress(value.mrUrl);
-    revision(value.headSha);
+    if (value.headSha !== null) revision(value.headSha);
     instant(value.observedAt);
     requireValue(Array.isArray(value.notes) && Buffer.byteLength(JSON.stringify(value), "utf8") <= 1_000_000);
     const previous = this.db.prepare("SELECT observed_at FROM team_review_comment_sources WHERE mr_url = ?").get(value.mrUrl);
@@ -335,6 +344,84 @@ export class TeamContextStore {
         .run(value.mrUrl, value.observedAt, JSON.stringify(value));
       return { status: "saved", mrUrl: value.mrUrl, commentCount: value.notes.length };
     });
+  }
+
+  saveProjectMrContext(snapshot) {
+    const value = jsonObject(snapshot);
+    value.mrUrl = mrAddress(value.mrUrl);
+    instant(value.observedAt);
+    if (value.headSha !== null) revision(value.headSha);
+    requireValue(Number.isSafeInteger(value.projectId) && value.projectId > 0 && Number.isSafeInteger(value.mrIid) && value.mrIid > 0
+      && Array.isArray(value.notes) && Array.isArray(value.issueKeys) && Buffer.byteLength(JSON.stringify(value), "utf8") <= 1_000_000);
+    const { observedAt, ...content } = value;
+    const hash = createHash("sha256").update(JSON.stringify(content)).digest("hex");
+    const previous = this.db.prepare("SELECT * FROM team_project_mr_contexts WHERE mr_url = ?").get(value.mrUrl);
+    if (previous && previous.observed_at > observedAt) return { changed: false, stale: true };
+    const before = previous ? JSON.parse(previous.snapshot_json) : null;
+    const oldNotes = new Map((before?.notes ?? []).map((note) => [note.id, note.bodyHash]));
+    const newNotes = new Map(value.notes.map((note) => [note.id, note.bodyHash]));
+    const delta = { added: [...newNotes.keys()].filter((id) => !oldNotes.has(id)).length,
+      edited: [...newNotes].filter(([id, bodyHash]) => oldNotes.has(id) && oldNotes.get(id) !== bodyHash).length,
+      removed: [...oldNotes.keys()].filter((id) => !newNotes.has(id)).length };
+    const changed = !previous || previous.content_hash !== hash;
+    return this.#save(changed ? [[["projects", reviewKeyFor(value.mrUrl.split("/-/merge_requests/")[0]), "mrs", `${value.mrIid}.md`], sourceMarkdown("MR와 댓글 최신 맥락", value)]] : [], () => {
+      const latest = this.db.prepare("SELECT content_hash, observed_at FROM team_project_mr_contexts WHERE mr_url = ?").get(value.mrUrl);
+      requireValue((latest?.content_hash ?? null) === (previous?.content_hash ?? null) && (!latest || latest.observed_at <= observedAt));
+      this.db.prepare(`INSERT INTO team_project_mr_contexts VALUES (?, ?, ?, ?)
+        ON CONFLICT(mr_url) DO UPDATE SET content_hash = excluded.content_hash, observed_at = excluded.observed_at, snapshot_json = excluded.snapshot_json`)
+        .run(value.mrUrl, hash, observedAt, JSON.stringify(value));
+      return { changed, ...delta };
+    });
+  }
+
+  projectContextForReview(mrUrl, issueKeys = []) {
+    const address = mrAddress(mrUrl), prefix = address.split("/-/merge_requests/")[0] + "/-/merge_requests/";
+    const records = this.db.prepare("SELECT snapshot_json FROM team_project_mr_contexts WHERE substr(mr_url, 1, ?) = ? ORDER BY observed_at DESC, mr_url")
+      .all(prefix.length, prefix).map((row) => JSON.parse(row.snapshot_json));
+    const related = (item) => item.mrUrl === address || item.issueKeys.some((key) => issueKeys.includes(key));
+    records.sort((a, b) => Number(related(b)) - Number(related(a)) || (b.updatedAt ?? b.observedAt).localeCompare(a.updatedAt ?? a.observedAt));
+    return { total: records.length, omittedCount: Math.max(0, records.length - 10), records: records.slice(0, 10).map((record) => ({
+      ...record, description: record.description.slice(0, 1200), descriptionTruncated: record.descriptionTruncated || record.description.length > 1200,
+      noteCount: record.notes.length, omittedNoteCount: Math.max(0, record.notes.length - 3),
+      notes: record.notes.slice(-3).map((note) => ({ ...note, body: note.body.slice(0, 800), truncated: note.truncated || note.body.length > 800 })),
+    })) };
+  }
+
+  startupSyncState(scope) {
+    const row = this.db.prepare("SELECT * FROM team_startup_sync WHERE scope = ?").get(text(scope, 64));
+    return row ? { lastSuccessAt: row.last_success_at, completedAt: row.completed_at, status: row.status,
+      leaseUntil: row.lease_until, retryAt: row.retry_at, errorCode: row.error_code,
+      summary: row.summary_json ? JSON.parse(row.summary_json) : null } : null;
+  }
+
+  claimStartupSync(scope, { now, requestedAt, leaseMs = 120_000 }) {
+    text(scope, 64); const at = milliseconds(now); instant(requestedAt);
+    const owner = randomUUID();
+    const result = this.db.prepare(`INSERT INTO team_startup_sync VALUES (?, NULL, NULL, 'running', ?, ?, 0, NULL, NULL)
+      ON CONFLICT(scope) DO UPDATE SET status = 'running', owner_token = excluded.owner_token,
+      lease_until = excluded.lease_until, retry_at = 0, error_code = NULL
+      WHERE (team_startup_sync.status <> 'running' OR team_startup_sync.lease_until <= ?)
+        AND team_startup_sync.retry_at <= ? AND (team_startup_sync.completed_at IS NULL OR team_startup_sync.completed_at < ?)`)
+      .run(scope, owner, at + leaseMs, at, at, requestedAt);
+    return result.changes ? owner : null;
+  }
+
+  renewStartupSync(scope, owner, { now, leaseMs = 120_000 }) {
+    const at = milliseconds(now);
+    return Boolean(this.db.prepare("UPDATE team_startup_sync SET lease_until = ? WHERE scope = ? AND owner_token = ? AND status = 'running' AND lease_until > ?")
+      .run(at + leaseMs, scope, owner, at).changes);
+  }
+
+  finishStartupSync(scope, owner, { now, success, startedAt, errorCode = null, summary = null }) {
+    const at = milliseconds(now); instant(startedAt);
+    requireValue(typeof success === "boolean" && (errorCode === null || /^[a-z][a-z0-9_]{0,63}$/.test(errorCode)));
+    return Boolean(this.db.prepare(`UPDATE team_startup_sync SET status = ?, owner_token = NULL, lease_until = 0,
+      last_success_at = CASE WHEN ? THEN ? ELSE last_success_at END,
+      completed_at = CASE WHEN ? THEN ? ELSE completed_at END, retry_at = ?, error_code = ?, summary_json = COALESCE(?, summary_json)
+      WHERE scope = ? AND owner_token = ? AND status = 'running' AND lease_until > ?`)
+      .run(success ? "done" : "failed", Number(success), startedAt, Number(success), new Date(at).toISOString(),
+        success || errorCode === "startup_sync_stopped" ? 0 : at + 60_000, errorCode,
+        summary === null ? null : JSON.stringify(summary), scope, owner, at).changes);
   }
 
   saveIssues(memberId, issues, { fetchedAt = new Date().toISOString(), expectedProfile } = {}) {

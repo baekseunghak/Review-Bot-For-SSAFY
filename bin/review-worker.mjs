@@ -4,6 +4,8 @@ import { ReviewInbox } from "../src/review-inbox.js";
 import { TeamContextService } from "../src/team-context.js";
 import { workerSettings } from "../src/review-worker-config.js";
 import { createConfiguredReviewWorker } from "../src/review-worker.js";
+import { StartupContextSync } from "../src/startup-context-sync.js";
+import { GitlabReviewClient } from "../src/review-gitlab.js";
 
 let inbox;
 let team;
@@ -14,14 +16,19 @@ try {
   inbox = new ReviewInbox({ dataDir: settings.dataDir, projectIds: settings.projectIds });
   team = new TeamContextService({ dataDir: settings.dataDir });
   mattermost = new MattermostService({ dataDir: settings.dataDir });
-  const stopWeekly = team.startWeeklyScheduler();
+  let stopWeekly = () => {};
   const worker = createConfiguredReviewWorker({ inbox, contextService: team, mattermost, settings });
-  worker.start({ unref: false });
-  process.stderr.write("Automatic review worker started. Inspect job stages with review_worker_status.\n");
+  const beginOperations = () => { stopWeekly = team.startWeeklyScheduler(); worker.start({ unref: false }); };
+  const startupSync = settings.startupSync ? new StartupContextSync({ contextService: team,
+    gitlab: new GitlabReviewClient({ host: settings.host, allowedProjectIds: settings.projectIds }),
+    projectIds: settings.projectIds, onReady: beginOperations }) : null;
+  if (startupSync) startupSync.start({ unref: false }); else beginOperations();
+  process.stderr.write(startupSync ? "Startup context recovery started; automatic review waits for completion.\n" : "Automatic review worker started. Inspect job stages with review_worker_status.\n");
   let stopping = false;
   const shutdown = async () => {
     if (stopping) return;
     stopping = true;
+    await startupSync?.stop();
     stopWeekly();
     await worker.stop();
     inbox.close(); team.close(); mattermost.close();
