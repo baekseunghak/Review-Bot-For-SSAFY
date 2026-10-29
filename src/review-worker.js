@@ -5,10 +5,11 @@ import { CodexReviewRunner } from "./codex-review-runner.js";
 import { GitlabReviewClient } from "./review-gitlab.js";
 import { MattermostReviewNotifier } from "./review-notifier.js";
 import { ReviewVerificationService, attachVerification, verificationReference } from "./review-verification.js";
+import { PartitionedReviewRunner } from "./partitioned-review.js";
 
 function problem(code) { return Object.assign(new UserError("Automatic review could not complete. Check the worker job status."), { code }); }
 const OBSOLETE = new Set(["request_obsolete", "stale_head", "review_not_open"]);
-const TERMINAL = new Set(["comment_conflict", "duplicate_comment", "unsupported_content", "no_reviewable_text", "context_too_large", "incomplete_context", "notification_setup_missing", "review_author_unmapped", "verification_receipt_invalid"]);
+const TERMINAL = new Set(["comment_conflict", "duplicate_comment", "unsupported_content", "no_reviewable_text", "context_too_large", "incomplete_context", "notification_setup_missing", "review_author_unmapped", "verification_receipt_invalid", "review_file_too_large", "review_integration_too_large", "review_partition_invalid", "review_receipt_invalid"]);
 
 export class ReviewWorker {
   constructor({ inbox, gitlab, contextService, runner, notifier, now = () => new Date(),
@@ -20,14 +21,15 @@ export class ReviewWorker {
     this.lastResult = null;
   }
 
-  runOnce() {
+  runOnce({ requestId } = {}) {
     if (this.task) return Promise.resolve({ status: "busy" });
-    this.task = this.#run().then((result) => { this.lastResult = result; return result; }).finally(() => { this.task = null; });
+    const claimed = requestId === undefined ? undefined : this.inbox.claimFailedForRun(requestId, { now: this.now(), leaseMs: this.leaseMs });
+    this.task = this.#run(claimed).then((result) => { this.lastResult = result; return result; }).finally(() => { this.task = null; });
     return this.task;
   }
 
-  async #run() {
-    const job = this.inbox.claimNext({ now: this.now(), leaseMs: this.leaseMs });
+  async #run(claimed) {
+    const job = claimed ?? this.inbox.claimNext({ now: this.now(), leaseMs: this.leaseMs });
     if (!job) return { status: "idle" };
     const { id, leaseToken } = job;
     let stage = job.stage;
@@ -71,7 +73,7 @@ export class ReviewWorker {
           if (bundle?.contextVersion !== artifact.contextRef.contextVersion) bundle = null;
         }
         if (!bundle) {
-          checkpoint("reviewing", { review: null, completion: null, comment: null });
+          checkpoint("reviewing", { review: null, completion: null, comment: null, contextSizeError: null });
           const changes = await this.gitlab.readReview(job);
           current();
           this.contextService.captureReviewComments?.(changes);
@@ -91,7 +93,8 @@ export class ReviewWorker {
           }
           const options = { context: bundle, changes, verification };
           let result = normalizeReviewResult(await this.runner.review({ context: bundle, changes,
-            ...(verification ? { verification } : {}) }, { signal: controller.signal }), options);
+            ...(verification ? { verification } : {}) }, { signal: controller.signal, assertCurrent: current,
+              onProgress: (partitionedReview) => checkpoint("reviewing", { partitionedReview }) }), options);
           if (verification) result = normalizeReviewResult(attachVerification(result, verification), options);
           current();
           checkpoint("reviewed", { review: result,
@@ -129,6 +132,10 @@ export class ReviewWorker {
         : /^[a-z][a-z0-9_]{0,63}$/.test(error?.code ?? "") ? error.code : "review_step_failed";
       try {
         owned({ allowStopped: true });
+        if (code === "context_too_large") checkpoint(stage, { contextSizeError: {
+          limitBytes: error.limitBytes ?? null, contextBytes: error.contextBytes ?? null,
+          section: error.section ?? null, filePath: error.filePath ?? null,
+        } }, true);
         if (OBSOLETE.has(code)) {
           checkpoint("skipped", { outcome: code }, true);
           this.inbox.finish(id, leaseToken, { now: this.now() });
@@ -171,11 +178,12 @@ export function createConfiguredReviewWorker({ inbox, contextService, mattermost
   const provider = settings.provider ?? "claude";
   if (!["claude", "codex"].includes(provider)) throw new UserError("Unsupported review provider.");
   const Runner = provider === "codex" ? CodexReviewRunner : ClaudeReviewRunner;
-  const gitlab = new GitlabReviewClient({ host: settings.host, allowedProjectIds: settings.projectIds });
+  const gitlab = new GitlabReviewClient({ host: settings.host, allowedProjectIds: settings.projectIds, maxContextBytes: 16_000_000 });
   return new ReviewWorker({ inbox, contextService,
     gitlab, verificationService: new ReviewVerificationService({ gitlab, dataDir: settings.dataDir,
       ...(settings.validationConfigPath ? { configPath: settings.validationConfigPath } : {}) }),
-    runner: new Runner({ command: settings.command, model: settings.model, timeoutMs: settings.timeoutMs }),
+    runner: new PartitionedReviewRunner({ dataDir: settings.dataDir,
+      runner: new Runner({ command: settings.command, model: settings.model, timeoutMs: settings.timeoutMs }) }),
     notifier: new MattermostReviewNotifier({ service: mattermost, channelName: settings.channelName }),
     intervalMs: settings.intervalMs });
 }

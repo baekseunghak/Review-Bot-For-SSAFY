@@ -843,6 +843,7 @@ SQLite가 원본이고 Markdown은 읽기 위한 자료입니다. 각 리뷰 워
 | 웹훅 401 | Secret token·프록시 헤더 확인. Signing token만으로는 인증 불가 |
 | 웹훅 202인데 수신함이 비어 있음 | 응답 status/reason, 감지 계정·프로젝트·Draft/닫힘·멘션 제외 규칙 확인 |
 | 웹훅 수신 후 댓글이 안 달림 | `REVIEWBOT_AUTO_REVIEW=1`, 동일 데이터 경로, worker 실행과 `review_worker_status`의 단계·오류 확인 |
+| 큰 MR의 입력 한도·분할 진행 | [전체 파일 분할·연동 검토와 명시적 재실행](docs/AUTO-REVIEW.md#큰-mr의-분할-검토)을 확인합니다. 누락이나 통합 실패 시 부분 결과를 게시하지 않습니다. |
 | Codex를 골랐는데 Claude가 실행됨 | provider·command를 함께 확인. `REVIEWBOT_REVIEW_PROVIDER=codex`, 기존 `REVIEWBOT_REVIEW_COMMAND=claude`를 비우고 MCP·worker 재시작 |
 | Codex 실행 파일/인증 오류 | worker와 같은 OS 계정에서 `codex --version`·`codex login status`, PATH·실제 `.exe` 경로 확인. 앱 로그인만으로 CLI 로그인을 가정하지 않음 |
 | Codex 옵션/출력 오류 | 설치 CLI가 `exec --ignore-user-config --ignore-rules --ephemeral --json --output-schema`를 지원하는지 확인. 실패 시 다른 권한·provider로 자동 전환하지 않음 |

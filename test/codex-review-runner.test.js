@@ -6,7 +6,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { CodexReviewRunner } from "../src/codex-review-runner.js";
 import { UserError } from "../src/core.js";
-import { REVIEW_RESULT_SCHEMA, REVIEW_SYSTEM_PROMPT } from "../src/review-runner.js";
+import { REVIEW_RESULT_SCHEMA, REVIEW_SYSTEM_PROMPT, reviewResultSchema } from "../src/review-runner.js";
 
 const context = {
   status: "fresh", headSha: "a".repeat(40), contextVersion: "b".repeat(64),
@@ -33,7 +33,7 @@ const disabledCodeModeNotice = { type: "item.completed", item: { id: "startup-co
 const failClosedCodeModeNotice = { type: "item.completed", item: { id: "startup-code-mode", type: "error",
   message: "Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`." } };
 
-function fakeRunner({ events = [message(), completed], raw, code = 0, stderr, hang = false, error, onInput } = {}) {
+function fakeRunner({ events = [message(), completed], raw, code = 0, stderr, hang = false, error, onInput, expectedSchema = REVIEW_RESULT_SCHEMA } = {}) {
   const calls = [];
   const spawnImpl = (file, args, options) => {
     const child = new EventEmitter();
@@ -45,7 +45,7 @@ function fakeRunner({ events = [message(), completed], raw, code = 0, stderr, ha
     calls.push(call);
     const schemaFile = args[args.indexOf("--output-schema") + 1];
     assert.equal(dirname(schemaFile), options.cwd);
-    assert.deepEqual(JSON.parse(readFileSync(schemaFile, "utf8")), REVIEW_RESULT_SCHEMA);
+    assert.deepEqual(JSON.parse(readFileSync(schemaFile, "utf8")), expectedSchema);
     child.stdin.on("data", (chunk) => { call.input += chunk.toString(); });
     child.stdin.on("finish", () => {
       onInput?.(call);
@@ -110,6 +110,19 @@ test("명시한 CLI 경로와 모델은 쉘 해석 없이 개별 인수로 전�
   assert.equal(fake.calls[0].args[fake.calls[0].args.indexOf("--model") + 1], "fixture-model");
   for (const value of ["", " ", "x".repeat(129), "fixture\nmodel", "fixture model", "--flag", false, 1]) {
     assert.throws(() => new CodexReviewRunner({ model: value }), UserError);
+  }
+});
+
+test("분할 파일·연동 단계는 추가 감사 스키마를 사용하고 감사 누락을 허용하지 않는다", async () => {
+  for (const phase of ["files", "integration"]) {
+    const input = { context, changes: { files: [] }, reviewPartition: { phase } };
+    const value = { ...review(), reviewAudit: { coveredFiles: ["src/input.js"], interfaces: [], findings: [], resolutions: [] } };
+    const fake = fakeRunner({ expectedSchema: reviewResultSchema(input), events: [message(value), completed] });
+    assert.deepEqual(await new CodexReviewRunner({ spawnImpl: fake.spawnImpl }).review(input), value);
+    const missing = fakeRunner({ expectedSchema: reviewResultSchema(input) });
+    await assert.rejects(new CodexReviewRunner({ spawnImpl: missing.spawnImpl }).review(input), { code: "review_audit_invalid" });
+    assert.equal(missing.calls.length, 1);
+    assert.equal(existsSync(missing.calls[0].options.cwd), false);
   }
 });
 

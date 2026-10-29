@@ -36,9 +36,10 @@ test("provider selection chooses the matching runner, command and optional model
     assert.equal(selected.command, provider);
     assert.equal(selected.model, "fixture-model");
     const worker = createConfiguredReviewWorker({ inbox: {}, contextService: {}, mattermost: {}, settings: selected });
-    assert.ok(worker.runner instanceof Runner);
-    assert.equal(worker.runner.command, provider);
-    assert.equal(worker.runner.model, "fixture-model");
+    assert.ok(worker.runner.runner instanceof Runner);
+    assert.equal(worker.runner.runner.command, provider);
+    assert.equal(worker.runner.runner.model, "fixture-model");
+    assert.equal(worker.gitlab.maxContextBytes, 16_000_000);
   }
   assert.equal(workerSettings({ ...settings, REVIEWBOT_REVIEW_PROVIDER: " Codex ", REVIEWBOT_REVIEW_COMMAND: "C:\\Program Files\\Codex\\codex.exe" }).command,
     "C:\\Program Files\\Codex\\codex.exe");

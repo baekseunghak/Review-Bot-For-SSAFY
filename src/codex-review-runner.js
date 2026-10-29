@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { UserError } from "./core.js";
-import { normalizeReviewResult, REVIEW_RESULT_SCHEMA, REVIEW_SYSTEM_PROMPT } from "./review-runner.js";
+import { normalizeRunnerEnvelope, reviewResultSchema, REVIEW_SYSTEM_PROMPT } from "./review-runner.js";
 import { runReviewProcess, serializeReviewInput, validateRunnerConfiguration, withReviewWorkspace } from "./review-runner-process.js";
 
 const DISABLED_CODE_MODE_NOTICES = new Set([
@@ -66,10 +66,11 @@ export class CodexReviewRunner {
   }
 
   async review(input, { signal } = {}) {
+    const schema = reviewResultSchema(input);
     const serialized = serializeReviewInput(input, this.maxInputBytes, signal);
     return withReviewWorkspace(async (directory) => {
       const schemaFile = join(directory, "review-result.schema.json");
-      try { await writeFile(schemaFile, JSON.stringify(REVIEW_RESULT_SCHEMA), { flag: "wx", mode: 0o600 }); }
+      try { await writeFile(schemaFile, JSON.stringify(schema), { flag: "wx", mode: 0o600 }); }
       catch { throw Object.assign(new UserError("The review runner could not prepare its output schema."), { code: "runner_start_failed" }); }
       const args = ["exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check",
         "--sandbox", "read-only", "--json", "--output-schema", schemaFile,
@@ -86,7 +87,7 @@ export class CodexReviewRunner {
       args.push("-");
       const output = await runReviewProcess({ command: this.command, args, directory, env: this.env,
         input: serialized, spawnImpl: this.spawn, timeoutMs: this.timeoutMs, maxOutputBytes: this.maxOutputBytes, signal });
-      return normalizeReviewResult(completedReview(output), { context: input?.context, changes: input?.changes, verification: input?.verification });
+      return normalizeRunnerEnvelope(completedReview(output), input);
     });
   }
 }

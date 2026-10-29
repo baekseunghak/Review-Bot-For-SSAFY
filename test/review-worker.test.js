@@ -10,6 +10,7 @@ import { MattermostReviewNotifier } from "../src/review-notifier.js";
 import { ReviewWorker } from "../src/review-worker.js";
 import { TeamContextService } from "../src/team-context.js";
 import { TeamContextStore } from "../src/team-context-store.js";
+import { PartitionedReviewRunner } from "../src/partitioned-review.js";
 
 const HEAD = "a".repeat(40);
 const NEXT = "d".repeat(40);
@@ -239,6 +240,26 @@ test("격리 실행 결과를 모델·댓글·누적 기록에 연결하고 모�
   assert.ok(saved.memory.validations.some((item) => item.check === "격리 test: backend-test" && item.result === "passed" && item.basis === "observed"));
   assert.equal(f.notes.length, 1);
   assert.equal(f.calls.notifications.length, 1);
+});
+
+test("한도 실패 요청의 원자적 재실행은 분할·전체 연동 뒤 댓글과 알림을 한 번만 보낸다", async (t) => {
+  const f = fixture(t), original = f.gitlab.readReview.bind(f.gitlab);
+  f.gitlab.readReview = async () => { throw Object.assign(new Error("bounded"), { code: "context_too_large" }); };
+  f.send(); assert.equal((await f.makeWorker().runOnce()).status, "failed");
+  f.gitlab.readReview = original;
+  const phases = [];
+  const runner = new PartitionedReviewRunner({ dataDir: f.contextService.dataDir, thresholdBytes: 1,
+    runner: { async review(input) {
+      phases.push(input.reviewPartition.phase);
+      return { ...result(), reviewAudit: { coveredFiles: input.changes.files.map(file => file.newPath),
+        interfaces: input.reviewPartition.phase === "files" ? input.changes.files.map(file => ({ file: file.newPath, summary: "반환 계약을 전체 파일에서 확인했습니다." })) : [],
+        findings: [], resolutions: [] } };
+    } } });
+  assert.equal((await f.makeWorker({ runner }).runOnce({ requestId: 1 })).status, "completed");
+  assert.deepEqual(phases, ["files", "integration"]);
+  assert.equal(f.notes.length, 1); assert.equal(f.calls.notifications.length, 1);
+  assert.match(f.notes[0].body, /텍스트 파일 1\/1개/);
+  assert.equal(f.artifact().partitionedReview.phase, "completed");
 });
 
 test("MR 설명의 SHA-256은 Jira 후보에서 제외하고 실제 이슈와 리뷰·게시·알림을 처리한다", async (t) => {

@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { UserError } from "../src/core.js";
-import { ClaudeReviewRunner, normalizeReviewResult, REVIEW_RESULT_SCHEMA, REVIEW_SYSTEM_PROMPT } from "../src/review-runner.js";
+import { ClaudeReviewRunner, normalizeReviewResult, normalizeRunnerEnvelope, reviewResultSchema, REVIEW_RESULT_SCHEMA, REVIEW_SYSTEM_PROMPT } from "../src/review-runner.js";
 
 const context = {
   status: "fresh", headSha: "a".repeat(40), contextVersion: "b".repeat(64),
@@ -25,6 +25,37 @@ function review() {
     },
   };
 }
+
+const partitionAudit = () => ({ coveredFiles: ["src/input.js"], interfaces: [{ file: "src/input.js", summary: "입력을 검증하고 실패 시 오류를 반환한다." }],
+  findings: [], resolutions: [] });
+
+test("분할 실행만 감사 배열을 요구하고 일반 리뷰 스키마·엄격한 결과 검증을 보존한다", () => {
+  assert.equal(reviewResultSchema({}), REVIEW_RESULT_SCHEMA);
+  for (const phase of ["files", "integration"]) {
+    const input = { context, reviewPartition: { phase } };
+    const schema = reviewResultSchema(input);
+    assert.deepEqual(schema.required, ["verdict", "body", "memory", "reviewAudit"]);
+    const audit = schema.properties.reviewAudit;
+    assert.equal(audit.additionalProperties, false);
+    assert.deepEqual(audit.required, ["coveredFiles", "interfaces", "findings", "resolutions"]);
+    assert.equal(audit.properties.coveredFiles.maxItems, 512);
+    assert.equal(audit.properties.interfaces.maxItems, 30);
+    assert.equal(audit.properties.findings.maxItems, 30);
+    assert.equal(audit.properties.resolutions.maxItems, 512);
+    assert.deepEqual(audit.properties.findings.items.properties.severity.enum, ["위험", "주의", "미미"]);
+    assert.equal(audit.properties.resolutions.items.properties.evidence.minItems, 1);
+    const value = { ...review(), reviewAudit: partitionAudit() };
+    assert.deepEqual(normalizeRunnerEnvelope(value, input), value);
+    for (const reviewAudit of [undefined, null, [], "audit"]) {
+      assert.throws(() => normalizeRunnerEnvelope({ ...review(), reviewAudit }, input), { code: "review_audit_invalid" });
+    }
+    assert.throws(() => normalizeRunnerEnvelope({ ...value, unknown: true }, input), { code: "review_result_invalid" });
+    assert.throws(() => normalizeRunnerEnvelope({ ...value, body: value.body + "\n/merge" }, input), { code: "review_body_invalid" });
+  }
+  assert.equal(REVIEW_RESULT_SCHEMA.properties.reviewAudit, undefined);
+  assert.throws(() => normalizeRunnerEnvelope({ ...review(), reviewAudit: partitionAudit() }, { context }), { code: "review_result_invalid" });
+  assert.throws(() => reviewResultSchema({ reviewPartition: { phase: "unknown" } }), { code: "review_partition_invalid" });
+});
 
 function holdReview() {
   const result = review();
@@ -140,6 +171,19 @@ test("Claude의 모델은 명시했을 때만 전달하고 잘못된 모델 인�
   const defaultFake = fakeRunner();
   await new ClaudeReviewRunner({ spawnImpl: defaultFake.spawnImpl }).review({ context });
   assert.equal(defaultFake.calls[0].args.includes("--model"), false);
+});
+
+test("파일·연동 분할 결과의 감사 자료를 모델 스키마와 반환값에 연결한다", async () => {
+  for (const phase of ["files", "integration"]) {
+    const input = { context, changes: { files: [] }, reviewPartition: { phase } };
+    const value = { ...review(), reviewAudit: partitionAudit() };
+    const fake = fakeRunner({ value });
+    assert.deepEqual(await new ClaudeReviewRunner({ spawnImpl: fake.spawnImpl }).review(input), value);
+    assert.deepEqual(JSON.parse(fake.calls[0].args[fake.calls[0].args.indexOf("--json-schema") + 1]), reviewResultSchema(input));
+    assert.equal(fake.calls.length, 1);
+    const missing = fakeRunner();
+    await assert.rejects(new ClaudeReviewRunner({ spawnImpl: missing.spawnImpl }).review(input), { code: "review_audit_invalid" });
+  }
 });
 
 test("본문은 기존 판정 조건과 실제 팀 맥락 인용을 지키며 보류는 코드 근거를 요구한다", () => {

@@ -297,6 +297,66 @@ test("전체 자료 또는 단일 파일이 한도를 넘으면 잘라서 성공
   }
 });
 
+test("수집 한도 오류에 내용 원문 없이 구간·바이트·파일 경로를 남긴다", async () => {
+  const fake = fixture({ contents: () => "x".repeat(400) });
+  const client = new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: fake.runImpl, maxContextBytes: 1024 });
+  await assert.rejects(client.readReview(input), (error) => {
+    assert.equal(error.code, "context_too_large");
+    assert.equal(error.limitBytes, 1024);
+    assert.equal(error.section, "headFiles");
+    assert.equal(error.filePath, "src/api.js");
+    assert.ok(error.contextBytes > error.limitBytes);
+    assert.equal(Object.values(error.byteBreakdown).reduce((sum, value) => sum + value, 0), error.contextBytes);
+    assert.doesNotMatch(JSON.stringify(error), /x{20}/);
+    return true;
+  });
+  const oversized = fixture({ contents: () => "x".repeat(2000) });
+  const single = new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: oversized.runImpl, maxContextBytes: 1024 });
+  await assert.rejects(single.readReview(input), (error) => {
+    assert.equal(error.section, "text_file");
+    assert.equal(error.filePath, "src/api.js");
+    assert.equal(error.contextBytes, 2000);
+    assert.deepEqual(error.byteBreakdown, { textFile: 2000 });
+    return true;
+  });
+});
+
+test("큰 수집 예산은 모든 변경 전후 내용을 보존하고 기본 한도는 유지한다", async () => {
+  const fake = fixture({ contents: ({ ref }) => (ref === headSha ? "n" : "o").repeat(550_000) });
+  assert.equal(fake.client.maxContextBytes, 1_000_000);
+  await assert.rejects(fake.client.readReview(input), { code: "context_too_large" });
+  const client = new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: fake.runImpl, maxContextBytes: 16_000_000 });
+  const result = await client.readReview(input);
+  assert.equal(result.files.length, 1);
+  assert.equal(result.files[0].baseContent.length, 550_000);
+  assert.equal(result.files[0].headContent.length, 550_000);
+  assert.ok(result.contextBytes > 1_000_000);
+  assert.equal(Object.values(result.contextByteBreakdown).reduce((sum, value) => sum + value, 0), result.contextBytes);
+});
+
+test("접힌 diff 복구는 원래 placeholder와 확장 자료를 중복 집계하지 않는다", async () => {
+  const expanded = diff();
+  const plain = await fixture().client.readReview(input);
+  const collapsed = fixture({ diffs: [diff({ collapsed: true, diff: "" })], intercept: ({ endpoint }) => endpoint.endsWith("/changes?access_raw_diffs=true")
+    ? { ...mr(), overflow: false, changes: [expanded] } : undefined });
+  const actual = await collapsed.client.readReview(input);
+  assert.equal(actual.contextBytes, plain.contextBytes);
+  assert.equal(actual.contextByteBreakdown.diffs, Buffer.byteLength(JSON.stringify([expanded])));
+});
+
+test("전송 응답 제한도 고정 코드와 안전한 크기 정보로 구분한다", async () => {
+  const client = new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: async () => {
+    throw Object.assign(new Error("private response"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" });
+  } });
+  await assert.rejects(client.api("user"), (error) => {
+    assert.equal(error.code, "context_too_large");
+    assert.equal(error.section, "api_response");
+    assert.equal(error.limitBytes, 4 * 1024 * 1024);
+    assert.doesNotMatch(JSON.stringify(error), /private response/);
+    return true;
+  });
+});
+
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=", "base64");
 const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xd9]);
 const imageDiff = (name, extra = {}) => diff({ old_path: name, new_path: name, diff: "", ...extra });
@@ -398,7 +458,26 @@ test("이미지 제외는 전체 diff·크기·checksum·최종 head 검증이�
   const oversized = Buffer.concat([png, Buffer.alloc(1024)]);
   const fake = fixture({ ...onlyImage, contents: () => oversized });
   await assert.rejects(new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: fake.runImpl, maxContextBytes: 1024 })
-    .readReview(input), { code: "context_too_large" });
+    .readReview(input), { code: "no_reviewable_text" });
+});
+
+test("이미지 원문은 텍스트 예산과 별도 상한을 사용하며 제외 메타데이터만 집계한다", async () => {
+  const content = Buffer.concat([png, Buffer.alloc(4000)]);
+  const mixed = fixture({ metadata: mr({ changes_count: "2" }), diffs: [diff(), imageDiff("screen.png", { new_file: true, a_mode: "0" })],
+    contents: ({ filePath, ref }) => filePath === "screen.png" ? content : ref === headSha ? "new\n" : "old\n" });
+  const result = await new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl: mixed.runImpl, maxContextBytes: 2000 }).readReview(input);
+  assert.equal(result.excludedImages[0].head.size, content.length);
+  assert.ok(result.contextBytes < 2000);
+  const raw = Buffer.concat([png, Buffer.alloc(16_000_001 - png.length)]);
+  const bounded = fixture({ contents: () => raw });
+  await assert.rejects(bounded.client.file(12, "screen.png", headSha), (error) => {
+    assert.equal(error.code, "context_too_large");
+    assert.equal(error.section, "raw_file");
+    assert.equal(error.filePath, "screen.png");
+    assert.equal(error.limitBytes, 16_000_000);
+    assert.equal(error.contextBytes, 16_000_001);
+    return true;
+  });
 });
 
 test("제외 이미지 바이트는 모델 컨텍스트에 넣지 않고 메타데이터만 집계한다", async () => {

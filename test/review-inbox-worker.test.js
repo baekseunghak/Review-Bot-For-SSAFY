@@ -201,6 +201,79 @@ test("explicit retry advances a waiting job without duplicating a running or com
   assert.throws(() => instance.retryFailed(job.id, { now: LATER }), UserError);
 });
 
+test("an explicit failed run claims the exact request atomically before another worker can take it", (t) => {
+  const { instance, open } = fixture(t);
+  send(instance);
+  const failed = instance.claimNext({ now: NOW });
+  instance.checkpoint(failed.id, failed.leaseToken, { stage: "reviewing", artifact: { marker: "private fixture" }, now: NOW });
+  instance.retry(failed.id, failed.leaseToken, { errorCode: "context_too_large", maxAttempts: 1, now: NOW });
+  assert.match(instance.workerStatus().jobs[0].lastErrorMessage, /수집 크기 한도/);
+  const other = open();
+  const claimed = instance.claimFailedForRun(failed.id, { now: LATER });
+  assert.deepEqual({ ...claimed, leaseToken: "token" }, {
+    id: failed.id, requestId: failed.id, projectId: 10, mrIid: 7, headSha: SHA, reasons: ["description_mention"],
+    leaseToken: "token", leaseExpiresAt: "2026-10-20T09:02:01.000Z", attempt: 1, stage: "reviewing", artifact: { marker: "private fixture" },
+  });
+  assert.notEqual(claimed.leaseToken, failed.leaseToken);
+  assert.equal(other.claimNext({ now: LATER }), null);
+  assert.throws(() => other.claimFailedForRun(failed.id, { now: LATER }), UserError);
+  assert.equal(instance.isCurrent(claimed.id, claimed.leaseToken, { now: LATER }), true);
+  assert.equal(instance.isCurrent(failed.id, failed.leaseToken, { now: LATER }), false);
+  assert.deepEqual(instance.workerStatus().jobs[0], {
+    requestId: failed.id, stage: "reviewing", status: "running", attempt: 1, lastErrorCode: null, lastErrorMessage: null, nextAttemptAt: null,
+  });
+});
+
+test("explicit claim preserves each pre-publication checkpoint and overrides waiting backoff without a requeue gap", (t) => {
+  for (const stage of ["queued", "reviewing", "validating", "reviewed"]) {
+    for (const maxAttempts of [1, 5]) {
+      const { instance } = fixture(t); send(instance);
+      const prior = instance.claimNext({ now: NOW });
+      instance.checkpoint(prior.id, prior.leaseToken, { stage, artifact: { progress: stage }, now: NOW });
+      instance.retry(prior.id, prior.leaseToken, { errorCode: "temporary", delayMs: 60_000, maxAttempts, now: NOW });
+      const job = instance.claimFailedForRun(prior.id, { now: LATER, leaseMs: 1000 });
+      assert.equal(job.stage, stage); assert.deepEqual(job.artifact, { progress: stage });
+      assert.equal(job.attempt, 1); assert.equal(job.leaseExpiresAt, "2026-10-20T09:00:02.000Z");
+    }
+  }
+});
+
+test("explicit claim rejects running, completed, and all publication or uncertain-delivery checkpoints", (t) => {
+  for (const stage of ["posting", "posted", "notifying", "notification_unknown", "completed", "skipped"]) {
+    const { instance } = fixture(t); send(instance);
+    const job = instance.claimNext({ now: NOW });
+    instance.checkpoint(job.id, job.leaseToken, { stage, now: NOW });
+    instance.retry(job.id, job.leaseToken, { errorCode: "temporary", maxAttempts: 1, now: NOW });
+    assert.throws(() => instance.claimFailedForRun(job.id, { now: LATER }), UserError);
+    assert.equal(instance.workerStatus().jobs[0].status, "failed");
+  }
+  const { instance } = fixture(t); send(instance);
+  const job = instance.claimNext({ now: NOW, leaseMs: 1000 });
+  assert.throws(() => instance.claimFailedForRun(job.id, { now: LATER }), UserError);
+  const recovered = instance.claimNext({ now: LATER });
+  instance.finish(recovered.id, recovered.leaseToken, { now: LATER });
+  assert.throws(() => instance.claimFailedForRun(job.id, { now: LATER }), UserError);
+});
+
+test("explicit claim rejects changed heads, closed or draft MRs, and projects outside the allowlist", (t) => {
+  for (const change of [{ state: "closed", action: "close" }, { draft: true }, { last_commit: { id: NEXT_SHA } }]) {
+    const { instance } = fixture(t); send(instance);
+    const job = instance.claimNext({ now: NOW });
+    instance.retry(job.id, job.leaseToken, { errorCode: "temporary", maxAttempts: 1, now: NOW });
+    send(instance, { ...change, updated_at: LATER }, "changed");
+    assert.throws(() => instance.claimFailedForRun(job.id, { now: LATER }), UserError);
+    assert.equal(instance.workerStatus().jobs[0].status, "failed");
+  }
+  const { instance, open } = fixture(t); send(instance);
+  const job = instance.claimNext({ now: NOW });
+  instance.retry(job.id, job.leaseToken, { errorCode: "temporary", maxAttempts: 1, now: NOW });
+  assert.throws(() => open([20]).claimFailedForRun(job.id, { now: LATER }), UserError);
+  for (const [requestId, options] of [[0, { now: LATER }], [job.id, { now: "invalid" }], [job.id, { now: LATER, leaseMs: 0 }]]) {
+    assert.throws(() => instance.claimFailedForRun(requestId, options), UserError);
+  }
+  assert.equal(instance.workerStatus().jobs[0].status, "failed");
+});
+
 test("successful notification finishes atomically with its completed stage", (t) => {
   const { instance } = fixture(t);
   send(instance);

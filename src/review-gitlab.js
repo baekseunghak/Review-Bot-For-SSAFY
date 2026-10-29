@@ -7,6 +7,7 @@ import { hasPriorityNotation } from "../bin/mr-review.mjs";
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 100;
+const MAX_RAW_FILE_BYTES = 16_000_000;
 
 function fail(code, message, details = {}) {
   const error = new UserError(message);
@@ -96,6 +97,11 @@ export class GitlabReviewClient {
       });
       value = JSON.parse(result);
     } catch (error) {
+      if (error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+        fail("context_too_large", "A GitLab response exceeded the bounded transport size.", {
+          section: "api_response", limitBytes: Math.max(4 * 1024 * 1024, this.maxContextBytes * 2),
+        });
+      }
       const status = [...String(error?.stderr ?? "").matchAll(/\bHTTP\s+(\d{3})\b/g)].at(-1)?.[1];
       fail("gitlab_request_failed", "GitLab request failed. Check glab authentication and project access.", status ? { httpStatus: Number(status) } : {});
     }
@@ -249,7 +255,9 @@ export class GitlabReviewClient {
     let bytes = 0;
     const notes = await this.pages(`${endpoint}/notes?sort=asc&order_by=created_at`, { onPage: (items) => {
       bytes += Buffer.byteLength(JSON.stringify(items), "utf8");
-      if (bytes > this.maxContextBytes) fail("context_too_large", "MR comments exceed the complete collection limit.");
+      if (bytes > this.maxContextBytes) fail("context_too_large", "MR comments exceed the complete collection limit.", {
+        section: "comments", limitBytes: this.maxContextBytes, contextBytes: bytes, byteBreakdown: { comments: bytes },
+      });
     } });
     return { ...snapshot, notesComplete: true, notesObservedAt,
       notes: notes.filter((note) => !note.system).map((note) => {
@@ -283,13 +291,20 @@ export class GitlabReviewClient {
     const startSha = mr.diff_refs?.start_sha;
     if (!SHA.test(baseSha ?? "") || !SHA.test(startSha ?? "")) fail("incomplete_context", "GitLab MR base commits are not ready.");
     let bytes = 0;
-    const consume = (value) => {
-      bytes += Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value), "utf8");
-      if (bytes > this.maxContextBytes) fail("context_too_large", "MR context exceeds the configured byte limit. Automatic review cannot use a partial diff or file.");
+    const byteBreakdown = { mr: 0, comments: 0, diffs: 0, baseFiles: 0, headFiles: 0, imageMetadata: 0 };
+    const sizeOf = (value) => Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value), "utf8");
+    const consume = (value, section, filePath, replacedValue) => {
+      const delta = sizeOf(value) - (replacedValue === undefined ? 0 : sizeOf(replacedValue));
+      bytes += delta;
+      byteBreakdown[section] += delta;
+      if (bytes > this.maxContextBytes) fail("context_too_large", "MR context exceeds the configured byte limit. Automatic review cannot use a partial diff or file.", {
+        section, limitBytes: this.maxContextBytes, contextBytes: bytes, byteBreakdown: { ...byteBreakdown },
+        ...(filePath === undefined ? {} : { filePath }),
+      });
     };
     const title = String(mr.title ?? "");
     const description = String(mr.description ?? "");
-    consume({ title, description });
+    consume({ title, description }, "mr");
     const notes = [];
     await this.pages(`${endpoint}/notes?sort=asc&order_by=created_at`, { onPage: (items) => {
       for (const note of items) {
@@ -297,11 +312,11 @@ export class GitlabReviewClient {
         if (!Number.isSafeInteger(note.id) || typeof note.body !== "string") fail("invalid_gitlab_response", "GitLab MR comment is invalid.");
         const normalized = { id: note.id, body: note.body, author: { id: note.author?.id, username: note.author?.username, bot: note.author?.bot === true },
           createdAt: note.created_at ?? null, updatedAt: note.updated_at ?? null };
-        consume(normalized);
+        consume(normalized, "comments");
         notes.push(normalized);
       }
     } });
-    let diffs = await this.pages(`${endpoint}/diffs`, { onPage: (items) => consume(items) });
+    let diffs = await this.pages(`${endpoint}/diffs`, { onPage: (items) => consume(items, "diffs") });
     if (!/^\d+$/.test(String(mr.changes_count ?? "")) || Number(mr.changes_count) !== diffs.length || !diffs.length) {
       fail("incomplete_context", "GitLab did not provide a complete, nonempty MR file list.");
     }
@@ -328,7 +343,7 @@ export class GitlabReviewClient {
           fail("incomplete_context", "GitLab raw diff file identities did not match.");
         }
         if (!diff.collapsed) return diff;
-        consume(expanded);
+        consume(expanded, "diffs", expanded.new_path, diff);
         return expanded;
       });
     }
@@ -366,12 +381,12 @@ export class GitlabReviewClient {
           fail("unsupported_content", "Only regular image files can be excluded from text review.");
         }
         const excluded = { ...metadata, reason: "image_content_not_reviewed", base: baseContent, head: headContent };
-        consume(excluded);
+        consume(excluded, "imageMetadata", newPath);
         excludedImages.push(excluded);
         continue;
       }
-      if (baseContent !== null) consume(baseContent);
-      if (headContent !== null) consume(headContent);
+      if (baseContent !== null) consume(baseContent, "baseFiles", oldPath);
+      if (headContent !== null) consume(headContent, "headFiles", newPath);
       const emptyFileAddedOrDeleted = (diff.new_file && headContent === "") || (diff.deleted_file && baseContent === "");
       if (!diff.diff.trim() && baseContent !== headContent && !emptyFileAddedOrDeleted) {
         fail("incomplete_context", "GitLab returned an empty diff for changed file contents.");
@@ -385,7 +400,7 @@ export class GitlabReviewClient {
       ...snapshot, baseSha: baseSha.toLowerCase(), startSha: startSha.toLowerCase(), title, description,
       notes, notesComplete: true, notesObservedAt, files, excludedImages, changedPaths: [...changedPaths],
       issueKeys: extractIssueKeys(title, description, mr.source_branch),
-      mrSource: { title, description, descriptionTruncated: false }, contextBytes: bytes,
+      mrSource: { title, description, descriptionTruncated: false }, contextBytes: bytes, contextByteBreakdown: byteBreakdown,
     };
   }
 
@@ -395,12 +410,20 @@ export class GitlabReviewClient {
     path(filePath);
     if (!SHA.test(ref ?? "")) fail("invalid_input", "GitLab file commit SHA is invalid.");
     const result = await this.api(`projects/${projectId}/repository/files/${encodeURIComponent(filePath)}?ref=${ref}`);
-    if (result.encoding !== "base64" || typeof result.content !== "string" || result.file_path !== filePath
-      || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(result.content.replace(/\n/g, ""))) {
+    if (result.encoding !== "base64" || typeof result.content !== "string" || result.file_path !== filePath) {
       fail("invalid_gitlab_response", "GitLab file content is invalid.");
     }
-    const content = Buffer.from(result.content, "base64");
-    if (content.length > this.maxContextBytes) fail("context_too_large", "A changed file exceeds the configured review byte limit.");
+    const encoded = result.content.replace(/\n/g, "");
+    const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+    // A repeated-group regex can overflow the regexp stack on a large valid file.
+    if (encoded.length % 4 !== 0 || /[^A-Za-z0-9+/]/.test(encoded.slice(0, encoded.length - padding))) {
+      fail("invalid_gitlab_response", "GitLab file content is invalid.");
+    }
+    const decodedBytes = encoded.length / 4 * 3 - padding;
+    if (decodedBytes > MAX_RAW_FILE_BYTES) fail("context_too_large", "A changed file exceeds the bounded raw file size.", {
+      section: "raw_file", filePath, limitBytes: MAX_RAW_FILE_BYTES, contextBytes: decodedBytes, byteBreakdown: { rawFile: decodedBytes },
+    });
+    const content = Buffer.from(encoded, "base64");
     if (result.content_sha256 && (typeof result.content_sha256 !== "string" || result.content_sha256.toLowerCase() !== hash(content))) {
       fail("invalid_gitlab_response", "GitLab file content checksum did not match.");
     }
@@ -415,6 +438,9 @@ export class GitlabReviewClient {
       }
       return { size: content.length, sha256: hash(content), format };
     }
+    if (content.length > this.maxContextBytes) fail("context_too_large", "A changed text file exceeds the configured review byte limit.", {
+      section: "text_file", filePath, limitBytes: this.maxContextBytes, contextBytes: content.length, byteBreakdown: { textFile: content.length },
+    });
     if (content.includes(0)) fail("unsupported_content", "Binary changed files require a separate review and are not automatically reviewed.");
     try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content); }
     catch { fail("unsupported_content", "Non-UTF-8 changed files require a separate review."); }

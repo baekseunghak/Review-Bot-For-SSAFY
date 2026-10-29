@@ -8,12 +8,19 @@ const ACTIONS = new Set(["open", "update", "close", "reopen", "merge", "approval
 const STATES = new Set(["opened", "closed", "merged", "locked"]);
 const USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$/;
 const ERROR_MESSAGES = new Map(Object.entries({
+  review_coverage_invalid: "분할 검토의 파일 완료 목록이 전체 목록과 일치하지 않아 게시를 중단했습니다.",
+  review_audit_invalid: "분할 검토의 지적·근거·완료 기록이 검증을 통과하지 못했습니다.",
+  review_integration_invalid: "전체 연동 검토에서 앞선 지적의 유지·반증 근거가 빠져 게시를 중단했습니다.",
+  review_file_too_large: "한 파일과 필수 맥락이 모델 입력 한도를 초과했습니다. 파일을 생략하지 않고 검토를 중단했습니다.",
+  review_integration_too_large: "전체 현재 파일과 분할 결과가 연동 검토 입력 한도를 초과했습니다. 부분 결과를 게시하지 않습니다.",
+  review_receipt_invalid: "저장한 분할 검토 결과가 누락·변경돼 안전하게 재개할 수 없습니다.",
   notification_unknown: "Mattermost 알림의 도착 여부가 불명확합니다. 확인 없이 자동으로 다시 보내지 않습니다.",
   notification_setup_missing: "활성 알림 채널과 MR 작성자의 GitLab·Mattermost 계정 연결 1개가 필요합니다. 설정을 보완한 뒤 명시적으로 재시도하세요.",
   review_author_unmapped: "MR 작성자가 팀원으로 연결되지 않았습니다. GitLab·Jira 계정과 담당 영역을 등록한 뒤 명시적으로 재시도하세요.",
   review_step_failed: "상세 원인이 기록되지 않은 오류입니다. 이 코드만으로 원인을 확정할 수 없습니다.",
   runner_configuration_invalid: "리뷰 실행기 설정값이 허용된 형식이나 범위를 벗어났습니다.",
   input_too_large: "검토 자료가 실행기의 입력 크기 제한을 초과했습니다.",
+  context_too_large: "MR 검토 자료가 수집 크기 한도를 초과했습니다. 해당 커밋의 자료 크기와 분할 검토 설정을 확인하세요.",
   runner_cancelled: "리뷰 실행이 취소되었습니다.",
   runner_start_failed: "리뷰 실행기를 시작하거나 임시 작업 공간을 준비하지 못했습니다.",
   runner_input_failed: "리뷰 자료를 실행기에 전달하지 못했습니다.",
@@ -481,6 +488,33 @@ export class ReviewInbox {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
+  claimFailedForRun(requestId, { now = new Date(), leaseMs = 120_000 } = {}) {
+    id(requestId);
+    const at = workerTime(now);
+    const expiresAt = new Date(Date.parse(at) + workerDuration(leaseMs)).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare(`SELECT r.*, e.stage, e.artifact FROM review_requests r
+        JOIN review_merge_requests m ON m.project_id = r.project_id AND m.mr_iid = r.mr_iid
+        JOIN review_executions e ON e.request_id = r.id
+        WHERE r.id = ? AND r.status = 'pending' AND m.state = 'opened' AND m.draft = 0 AND m.head_sha = r.head_sha
+          AND e.status IN ('failed', 'retry') AND e.stage IN ('queued', 'reviewing', 'validating', 'reviewed')`).get(requestId);
+      if (!row || !this.projectIds.has(row.project_id)) {
+        throw new UserError("Only a current failed or waiting review before publication can be claimed for an explicit run.");
+      }
+      const artifact = JSON.parse(row.artifact);
+      const reasons = JSON.parse(row.reasons);
+      const leaseToken = randomUUID();
+      this.db.prepare(`UPDATE review_executions SET status = 'running', attempts = 1,
+        lease_token = ?, lease_expires_at = ?, next_attempt_at = NULL, error_code = NULL, updated_at = ?
+        WHERE request_id = ?`).run(leaseToken, expiresAt, at, requestId);
+      this.db.exec("COMMIT");
+      return { id: Number(row.id), requestId: Number(row.id), projectId: row.project_id,
+        mrIid: row.mr_iid, headSha: row.head_sha, reasons,
+        leaseToken, leaseExpiresAt: expiresAt, attempt: 1, stage: row.stage, artifact };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
   commentSyncTargets({ limit = 25, offset = 0 } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0) throw new UserError("Invalid comment sync page.");
     const targets = this.db.prepare("SELECT DISTINCT project_id, mr_iid FROM review_requests ORDER BY project_id, mr_iid")
@@ -493,12 +527,14 @@ export class ReviewInbox {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new UserError("limit must be an integer between 1 and 100.");
     const counts = { running: 0, retry: 0, completed: 0, failed: 0 };
     for (const row of this.db.prepare("SELECT status, COUNT(*) AS count FROM review_executions GROUP BY status").all()) counts[row.status] = Number(row.count);
-    const jobs = this.db.prepare(`SELECT request_id, stage, status, attempts, error_code, next_attempt_at
+    const jobs = this.db.prepare(`SELECT request_id, stage, status, attempts, error_code, next_attempt_at, artifact
       FROM review_executions ORDER BY updated_at DESC, request_id DESC LIMIT ?`).all(limit).map((row) => ({
       requestId: Number(row.request_id), stage: row.stage, status: row.status,
       attempt: Number(row.attempts), lastErrorCode: row.error_code,
       lastErrorMessage: row.error_code ? ERROR_MESSAGES.get(row.error_code) ?? "추가 진단이 필요한 처리 오류입니다. 오류 코드와 단계를 확인하세요." : null,
       nextAttemptAt: row.next_attempt_at,
+      ...(JSON.parse(row.artifact).partitionedReview ? { partitionedReview: JSON.parse(row.artifact).partitionedReview } : {}),
+      ...(JSON.parse(row.artifact).contextSizeError ? { contextSizeError: JSON.parse(row.artifact).contextSizeError } : {}),
     }));
     return { counts, jobs };
   }
