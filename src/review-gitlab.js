@@ -291,7 +291,7 @@ export class GitlabReviewClient {
     const startSha = mr.diff_refs?.start_sha;
     if (!SHA.test(baseSha ?? "") || !SHA.test(startSha ?? "")) fail("incomplete_context", "GitLab MR base commits are not ready.");
     let bytes = 0;
-    const byteBreakdown = { mr: 0, comments: 0, diffs: 0, baseFiles: 0, headFiles: 0, imageMetadata: 0 };
+    const byteBreakdown = { mr: 0, comments: 0, diffs: 0, baseFiles: 0, headFiles: 0, imageMetadata: 0, pdfFixtureMetadata: 0 };
     const sizeOf = (value) => Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value), "utf8");
     const consume = (value, section, filePath, replacedValue) => {
       const delta = sizeOf(value) - (replacedValue === undefined ? 0 : sizeOf(replacedValue));
@@ -350,6 +350,7 @@ export class GitlabReviewClient {
     const seen = new Set();
     const files = [];
     const excludedImages = [];
+    const excludedPdfFixtures = [];
     const changedPaths = new Set();
     for (const diff of diffs) {
       if (!diff || typeof diff.diff !== "string" || diff.too_large || diff.collapsed) {
@@ -373,6 +374,17 @@ export class GitlabReviewClient {
       const metadata = { oldPath, newPath, newFile: diff.new_file, deletedFile: diff.deleted_file,
         renamedFile: diff.renamed_file, oldMode: diff.a_mode, newMode: diff.b_mode };
       if ((baseContent !== null && typeof baseContent === "object") || (headContent !== null && typeof headContent === "object")) {
+        const isPdf = baseContent?.format === "pdf" || headContent?.format === "pdf";
+        if (isPdf) {
+          const versions = [[baseContent, diff.a_mode], [headContent, diff.b_mode]];
+          if (versions.some(([content, mode]) => content !== null && (content.format !== "pdf" || mode !== "100644"))) {
+            fail("unsupported_content", "Only non-executable PDF test fixtures on both existing sides can be excluded from text review.");
+          }
+          const excluded = { ...metadata, reason: "pdf_fixture_requires_separate_review", base: baseContent, head: headContent };
+          consume(excluded, "pdfFixtureMetadata", newPath);
+          excludedPdfFixtures.push(excluded);
+          continue;
+        }
         if (typeof baseContent === "string" || typeof headContent === "string") {
           fail("unsupported_content", "A changed file switches between image and text content and requires a separate review.");
         }
@@ -395,10 +407,10 @@ export class GitlabReviewClient {
     }
     const finalHead = await this.readHead(input);
     this.assertReady(finalHead, snapshot.headSha);
-    if (!files.length) fail("no_reviewable_text", "MR contains only excluded images and has no reviewable text. Image contents require a separate review.");
+    if (!files.length) fail("no_reviewable_text", "MR contains only files that require separate review and has no reviewable text.");
     return {
       ...snapshot, baseSha: baseSha.toLowerCase(), startSha: startSha.toLowerCase(), title, description,
-      notes, notesComplete: true, notesObservedAt, files, excludedImages, changedPaths: [...changedPaths],
+      notes, notesComplete: true, notesObservedAt, files, excludedImages, excludedPdfFixtures, changedPaths: [...changedPaths],
       issueKeys: extractIssueKeys(title, description, mr.source_branch),
       mrSource: { title, description, descriptionTruncated: false }, contextBytes: bytes, contextByteBreakdown: byteBreakdown,
     };
@@ -427,12 +439,20 @@ export class GitlabReviewClient {
     if (result.content_sha256 && (typeof result.content_sha256 !== "string" || result.content_sha256.toLowerCase() !== hash(content))) {
       fail("invalid_gitlab_response", "GitLab file content checksum did not match.");
     }
-    const format = imageFormat(content);
+    const extension = /\.([^.\/]+)$/.exec(filePath)?.[1].toLowerCase();
+    const pdfHeader = /^%PDF-(?:1\.[0-7]|2\.0)[\r\n]/.test(content.toString("latin1", 0, 9));
+    const format = pdfHeader ? "pdf" : imageFormat(content);
+    if (extension === "pdf" || pdfHeader) {
+      const eof = content.lastIndexOf("%%EOF");
+      if (!pdfHeader || !/(?:^|\/)tests?\/fixtures\/.+\.pdf$/i.test(filePath) || eof < 9
+        || /[^\x00\t\n\f\r ]/.test(content.toString("latin1", eof + 5))) {
+        fail("unsupported_content", "Only PDF files with PDF header and end markers under test/fixtures or tests/fixtures can be excluded.");
+      }
+    }
     if (format) {
       if (result.size !== undefined && (!Number.isSafeInteger(result.size) || result.size !== content.length)) {
-        fail("invalid_gitlab_response", "GitLab image content size did not match.");
+        fail("invalid_gitlab_response", "GitLab binary content size did not match.");
       }
-      const extension = /\.([^.\/]+)$/.exec(filePath)?.[1].toLowerCase();
       if (extension !== format && !(format === "jpeg" && extension === "jpg")) {
         fail("unsupported_content", "An image file signature does not match its filename extension.");
       }

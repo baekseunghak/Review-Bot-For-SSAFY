@@ -64,6 +64,28 @@ function fixture({ metadata = mr(), diffs = [diff()], notes = [], contents, afte
   return { client: new GitlabReviewClient({ host, allowedProjectIds: [12], runImpl }), calls, notes, runImpl };
 }
 
+test("PDF 제외는 양쪽 모두 일반 PDF 테스트 픽스처일 때만 적용한다", async () => {
+  const pdf = Buffer.from("%PDF-1.4\n%\x00\xff\n%%EOF\n", "latin1");
+  const pdfPath = "screening/tests/fixtures/disclosure/synthetic-report.pdf";
+  const pdfDiff = diff({ old_path: pdfPath, new_path: pdfPath, diff: "" });
+  const read = (changed, contents = () => pdf) => fixture({ diffs: [changed], contents }).client.readReview(input);
+  await assert.rejects(read(pdfDiff), { code: "no_reviewable_text" });
+  for (const [changed, contents] of [
+    [{ ...pdfDiff, old_path: "docs/report.pdf", new_path: "docs/report.pdf" }],
+    [{ ...pdfDiff, old_path: "docs/report.pdf", renamed_file: true }],
+    [{ ...pdfDiff, old_path: "tests/fixtures/report.bin", new_path: "tests/fixtures/report.bin" }],
+    [{ ...pdfDiff, b_mode: "120000" }],
+    [{ ...pdfDiff, b_mode: "100755" }],
+    [pdfDiff, () => Buffer.from([0, 255, 0])],
+    [pdfDiff, () => "%PDF-1.4\nnot a complete fixture"],
+    [diff({ old_path: "tests/fixtures/data.bin", new_path: "tests/fixtures/data.bin", diff: "" }), () => Buffer.from([0, 255, 0])],
+    [{ ...pdfDiff, old_path: "tests/fixtures/report.txt", renamed_file: true },
+      ({ ref }) => ref === baseSha ? "previous text" : pdf],
+  ]) {
+    await assert.rejects(read(changed, contents), { code: "unsupported_content" });
+  }
+});
+
 test("자동 리뷰는 숫자 프로젝트 허용 목록과 안전한 host를 강제한다", async () => {
   for (const invalidHost of ["https://gitlab.example.com", "user:secret@gitlab.example.com", "-example.com", "example.com/path", "example.com?token=secret"]) {
     assert.throws(() => new GitlabReviewClient({ host: invalidHost, allowedProjectIds: [12] }));
