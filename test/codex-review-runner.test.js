@@ -188,6 +188,15 @@ test("Codex 결과도 동일한 맥락·공개 본문·검증 사실 검사를 �
 });
 
 test("입력 크기·stdout·stderr·시간 제한과 취소를 적용하며 임시 스키마를 삭제한다", async () => {
+  const characterLimit = 1_048_576;
+  const oversized = fakeRunner();
+  await assert.rejects(new CodexReviewRunner({ spawnImpl: oversized.spawnImpl }).review({
+    padding: "x".repeat(characterLimit),
+  }), { code: "input_too_large" });
+  assert.equal(oversized.calls.length, 0, "Byte budgets must also respect the CLI's character limit before starting it.");
+  const boundary = fakeRunner();
+  await new CodexReviewRunner({ spawnImpl: boundary.spawnImpl }).review({ v: "x".repeat(characterLimit - 8) });
+  assert.equal(boundary.calls[0].input.length, characterLimit);
   const unused = fakeRunner();
   await assert.rejects(new CodexReviewRunner({ spawnImpl: unused.spawnImpl, maxInputBytes: 10 }).review({ value: "too much input" }), { code: "input_too_large" });
   assert.equal(unused.calls.length, 0);

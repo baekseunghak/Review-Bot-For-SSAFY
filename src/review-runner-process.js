@@ -13,10 +13,11 @@ export function validateRunnerConfiguration({ command, model = null, timeoutMs, 
   }
 }
 
-export function serializeReviewInput(input, maxInputBytes, signal) {
+export function serializeReviewInput(input, maxInputBytes, signal, maxInputCharacters = Infinity) {
   let serialized;
   try { serialized = JSON.stringify(input); } catch { throw Object.assign(new UserError("Invalid review input."), { code: "runner_input_failed" }); }
-  if (typeof serialized !== "string" || Buffer.byteLength(serialized, "utf8") > maxInputBytes) {
+  if (typeof serialized !== "string" || Buffer.byteLength(serialized, "utf8") > maxInputBytes
+    || serialized.length > maxInputCharacters) {
     throw Object.assign(new UserError("The review input exceeds the runner limit. No partial review was published."), { code: "input_too_large" });
   }
   if (signal?.aborted) throw Object.assign(new UserError("The review runner was cancelled."), { code: "runner_cancelled" });

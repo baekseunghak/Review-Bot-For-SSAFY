@@ -17,6 +17,31 @@ function reviewDigest(value) {
   };
   return hash(semantic(value));
 }
+
+function integrationContext(context) {
+  if (!context) return context;
+  return {
+    ...context,
+    perspectives: context.perspectives?.map(({ workItems = [], reviewerObservations, ...view }) => ({
+      ...view,
+      workItems: workItems.map(({ key, summary, url, status }) => ({ key, summary, url, status })),
+      detailsReviewedInFilePass: true,
+    })),
+    reviewHistory: context.reviewHistory && {
+      ...context.reviewHistory,
+      records: context.reviewHistory.records.map(({ memory, ...record }) => ({
+        ...record, memory: { remainingWork: memory.remainingWork },
+      })),
+      detailsReviewedInFilePass: true,
+    },
+    projectActivity: context.projectActivity && {
+      ...context.projectActivity,
+      records: context.projectActivity.records.map(({ mrUrl, headSha, title }) => ({ mrUrl, headSha, title })),
+      detailsReviewedInFilePass: true,
+    },
+    integrationContextPolicy: "파일별 단계에서 전체 배경 이력을 검토했습니다. 통합 단계의 업무 이슈는 제목·상태·출처, 과거 리뷰는 남은 작업, 프로젝트 활동은 MR 참조로 축약했습니다. 분할 본문 대신 구조화된 지적·인터페이스·구현·결정·검증·남은 작업을 제공합니다. 성공한 검사의 원문 로그는 실행 영수증에 있으며 명령·SHA·종료 코드·실행 결과는 유지합니다. 실패 로그와 현재 연결 Jira 요구사항·등록 명세·모든 현재 코드도 함께 제공합니다. 축약한 배경 이력에 관한 판단은 분할 검토 결과를 참고합니다.",
+  };
+}
 const fail = (code) => { throw Object.assign(new UserError("Partitioned review did not complete. No partial review was published."), { code }); };
 const filePath = (file) => file.deletedFile ? file.oldPath : file.newPath;
 const lineCount = (value) => value ? value.split(/\r?\n/).length - Number(/\n$/.test(value)) : 0;
@@ -63,9 +88,14 @@ export class PartitionedReviewRunner {
   constructor({ runner, dataDir, thresholdBytes = 1_000_000, batchBytes = 1_000_000, maxFilesPerBatch = 12 }) {
     Object.assign(this, { runner, dataDir, thresholdBytes, batchBytes, maxFilesPerBatch });
     this.maxInputBytes = runner.maxInputBytes ?? 2 * 1024 * 1024;
+    this.maxInputCharacters = runner.maxInputCharacters ?? Infinity;
   }
 
   async review(input, { signal, assertCurrent = () => {}, onProgress = () => {} } = {}) {
+    const fits = (payload, byteLimit = this.maxInputBytes) => {
+      const serialized = JSON.stringify(payload);
+      return Buffer.byteLength(serialized) <= byteLimit && serialized.length <= this.maxInputCharacters;
+    };
     if (bytes(input) <= Math.min(this.thresholdBytes, this.maxInputBytes) && (input.changes.contextBytes ?? 0) <= this.thresholdBytes) {
       return this.runner.review(input, { signal });
     }
@@ -75,7 +105,7 @@ export class PartitionedReviewRunner {
       baseHash: hash(file.baseContent), headHash: hash(file.headContent), diffHash: hash(file.diff),
       oldMode: file.oldMode, newMode: file.newMode, deletedFile: file.deletedFile, newFile: file.newFile, renamedFile: file.renamedFile }));
     const { notesObservedAt, ...stableChanges } = input.changes;
-    const identity = { version: 1, planner: [this.thresholdBytes, this.batchBytes, this.maxFilesPerBatch, this.maxInputBytes],
+    const identity = { version: 1, planner: [this.thresholdBytes, this.batchBytes, this.maxFilesPerBatch, this.maxInputBytes, this.maxInputCharacters],
       contextVersion: input.context?.contextVersion, contextHash: reviewDigest(input.context),
       changesHash: reviewDigest(stableChanges), verificationHash: hash(input.verification ?? null), promptHash: hash(REVIEW_SYSTEM_PROMPT),
       runner: [this.runner.constructor.name, this.runner.command, this.runner.model], manifest };
@@ -97,11 +127,11 @@ export class PartitionedReviewRunner {
     let pending = [];
     for (const file of files) {
       const trial = [...pending, file];
-      if (pending.length && (trial.length > this.maxFilesPerBatch || bytes(makeInput(trial, "files", 512, 512)) > Math.min(this.batchBytes, this.maxInputBytes))) {
+      if (pending.length && (trial.length > this.maxFilesPerBatch || !fits(makeInput(trial, "files", 512, 512), Math.min(this.batchBytes, this.maxInputBytes)))) {
         batches.push(pending); pending = [];
       }
       pending.push(file);
-      if (bytes(makeInput(pending, "files", 512, 512)) > this.maxInputBytes) fail("review_file_too_large");
+      if (!fits(makeInput(pending, "files", 512, 512))) fail("review_file_too_large");
     }
     if (pending.length) batches.push(pending);
     const plan = { planId, headSha: input.changes.headSha, contextVersion: input.context?.contextVersion,
@@ -149,8 +179,12 @@ export class PartitionedReviewRunner {
       await checkpoint({ phase: "files", totalBatches: batches.length, completedBatches: index + 1 });
     }
     const integrationFiles = files.map((file) => ({ ...file, diff: "", baseContent: file.deletedFile ? file.baseContent : null }));
-    const payload = makeInput(integrationFiles, "integration", batches.length + 1, batches.length, reports, findings);
-    if (bytes(payload) > this.maxInputBytes) fail("review_integration_too_large");
+    let payload = makeInput(integrationFiles, "integration", batches.length + 1, batches.length, reports, findings);
+    if (!fits(payload)) payload = { ...payload, context: integrationContext(input.context),
+      partitionReports: reports.map(({ body, ...report }) => report),
+      ...(input.verification ? { verification: { ...input.verification,
+        checks: input.verification.checks.map((check) => check.result === "passed" ? { ...check, output: "" } : check) } } : {}) };
+    if (!fits(payload)) fail("review_integration_too_large");
     await checkpoint({ phase: "integration", totalBatches: batches.length, completedBatches: batches.length });
     const integrated = await receipt("integration", payload, () => this.runner.review(payload, { signal }),
       (value) => validateAudit(value, integrationFiles, "integration", findings));

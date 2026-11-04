@@ -9,7 +9,7 @@ import { PartitionedReviewRunner } from "./partitioned-review.js";
 
 function problem(code) { return Object.assign(new UserError("Automatic review could not complete. Check the worker job status."), { code }); }
 const OBSOLETE = new Set(["request_obsolete", "stale_head", "review_not_open"]);
-const TERMINAL = new Set(["comment_conflict", "duplicate_comment", "unsupported_content", "no_reviewable_text", "context_too_large", "incomplete_context", "notification_setup_missing", "review_author_unmapped", "verification_receipt_invalid", "review_file_too_large", "review_integration_too_large", "review_partition_invalid", "review_receipt_invalid"]);
+const TERMINAL = new Set(["comment_conflict", "duplicate_comment", "unsupported_content", "no_reviewable_text", "context_too_large", "input_too_large", "incomplete_context", "notification_setup_missing", "review_author_unmapped", "verification_receipt_invalid", "review_file_too_large", "review_integration_too_large", "review_partition_invalid", "review_receipt_invalid"]);
 
 export class ReviewWorker {
   constructor({ inbox, gitlab, contextService, runner, notifier, now = () => new Date(),

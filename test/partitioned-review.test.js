@@ -90,6 +90,59 @@ test("분할 검토는 이름 변경·삭제를 포함한 모든 파일을 완�
   assert.equal(progress.at(-1).phase, "completed");
 });
 
+test("통합 문자 한도는 배경 이력만 축약하고 모든 코드·현재 요구·이전 남은 작업을 보존한다", async (t) => {
+  const input = inputFixture();
+  for (const file of input.changes.files) {
+    if (file.deletedFile) file.baseContent = "x".repeat(10_000);
+    else file.headContent = "x".repeat(10_000);
+  }
+  input.context.perspectives[0].workItems = [{ key: "TEST-2", summary: "Background work", url: "https://jira.example.test/TEST-2",
+    status: { name: "Done" }, description: "background ".repeat(2_500) }];
+  input.context.perspectives[0].reviewerObservations = { comments: "past ".repeat(500) };
+  input.context.reviewHistory = { records: [{ id: "prior", memory: { implementation: "history ".repeat(400),
+    remainingWork: [{ summary: "Preserve this unresolved item" }] } }] };
+  input.context.projectActivity = { records: [{ mrUrl: "https://gitlab.example.test/team/repo/-/merge_requests/2",
+    headSha: "a".repeat(40), description: "activity ".repeat(400) }] };
+  input.verification = { headSha: input.context.headSha, runId: "fixture", ci: { pipeline: null }, checks: [
+    { name: "success", result: "passed", output: "success log", command: ["test"], exitCode: 0 },
+    { name: "failure", result: "failed", output: "failure evidence", command: ["test"], exitCode: 1 },
+  ] };
+  const original = structuredClone(input);
+  const { review, calls } = await setup(t);
+  review.maxInputCharacters = 70_000;
+  await review.review(input);
+  const batches = calls.filter((payload) => payload.reviewPartition.phase === "files");
+  assert.ok(batches.every((payload) => JSON.stringify(payload).length <= 70_000));
+  assert.ok(batches.every((payload) => payload.context.perspectives[0].workItems[0].description
+    === input.context.perspectives[0].workItems[0].description));
+  const final = calls.at(-1);
+  assert.ok(JSON.stringify(final).length <= 70_000);
+  assert.deepEqual(final.context.relatedIssues, input.context.relatedIssues);
+  assert.deepEqual(final.context.reviewHistory.records[0].memory.remainingWork,
+    input.context.reviewHistory.records[0].memory.remainingWork);
+  assert.deepEqual(final.changes.files.map((file) => file.deletedFile ? file.baseContent : file.headContent),
+    input.changes.files.map((file) => file.deletedFile ? file.baseContent : file.headContent));
+  assert.match(final.context.integrationContextPolicy, /파일별 단계/);
+  assert.ok(final.partitionReports.every((report) => report.body === undefined
+    && report.interfaces.length > 0 && report.memory.implementation.length > 0));
+  assert.deepEqual(final.verification.checks, [
+    { ...input.verification.checks[0], output: "" }, input.verification.checks[1],
+  ]);
+  assert.deepEqual(input, original);
+});
+
+test("통합 원문 자체가 문자 한도를 넘으면 부분 결과를 게시하지 않고 중단한다", async (t) => {
+  const input = inputFixture();
+  for (const file of input.changes.files) {
+    if (file.deletedFile) file.baseContent = "x".repeat(10_000);
+    else file.headContent = "x".repeat(10_000);
+  }
+  const { review, calls } = await setup(t);
+  review.maxInputCharacters = 30_000;
+  await assert.rejects(review.review(input), { code: "review_integration_too_large" });
+  assert.ok(calls.every((payload) => payload.reviewPartition.phase === "files"));
+});
+
 for (const phase of ["files", "integration"]) {
   for (const invalid of ["missing", "duplicate"]) {
     test(`${phase} 단계의 ${invalid} 파일 검토 확인은 최종 리뷰를 만들지 않는다`, async (t) => {

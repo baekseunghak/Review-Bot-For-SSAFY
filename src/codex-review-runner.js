@@ -60,6 +60,8 @@ export class CodexReviewRunner {
     this.model = model;
     this.timeoutMs = timeoutMs;
     this.maxInputBytes = maxInputBytes;
+    // turn/start enforces a character limit independently of the byte budget.
+    this.maxInputCharacters = 1_048_576;
     this.maxOutputBytes = maxOutputBytes;
     this.spawn = spawnImpl;
     this.env = runnerEnvironment(env);
@@ -67,7 +69,7 @@ export class CodexReviewRunner {
 
   async review(input, { signal } = {}) {
     const schema = reviewResultSchema(input);
-    const serialized = serializeReviewInput(input, this.maxInputBytes, signal);
+    const serialized = serializeReviewInput(input, this.maxInputBytes, signal, this.maxInputCharacters);
     return withReviewWorkspace(async (directory) => {
       const schemaFile = join(directory, "review-result.schema.json");
       try { await writeFile(schemaFile, JSON.stringify(schema), { flag: "wx", mode: 0o600 }); }
