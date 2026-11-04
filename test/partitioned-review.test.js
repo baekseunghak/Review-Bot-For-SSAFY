@@ -103,6 +103,9 @@ test("통합 문자 한도는 배경 이력만 축약하고 모든 코드·현�
     remainingWork: [{ summary: "Preserve this unresolved item" }] } }] };
   input.context.projectActivity = { records: [{ mrUrl: "https://gitlab.example.test/team/repo/-/merge_requests/2",
     headSha: "a".repeat(40), description: "activity ".repeat(400) }] };
+  input.changes.description = "Current MR requirements";
+  input.changes.mrSource = { description: input.changes.description };
+  input.changes.changedPaths = input.changes.files.map(pathOf);
   input.verification = { headSha: input.context.headSha, runId: "fixture", ci: { pipeline: null }, checks: [
     { name: "success", result: "passed", output: "success log", command: ["test"], exitCode: 0 },
     { name: "failure", result: "failed", output: "failure evidence", command: ["test"], exitCode: 1 },
@@ -118,6 +121,11 @@ test("통합 문자 한도는 배경 이력만 축약하고 모든 코드·현�
   const final = calls.at(-1);
   assert.ok(JSON.stringify(final).length <= 70_000);
   assert.deepEqual(final.context.relatedIssues, input.context.relatedIssues);
+  assert.equal(final.changes.description, input.changes.description);
+  assert.equal(final.changes.mrSource, undefined);
+  assert.equal(final.changes.changedPaths, undefined);
+  assert.deepEqual(final.context.perspectives[0].workItems, [{ key: "TEST-2" }]);
+  assert.deepEqual(final.reviewPartition.fullManifest, input.changes.files.map((file) => ({ path: pathOf(file) })));
   assert.deepEqual(final.context.reviewHistory.records[0].memory.remainingWork,
     input.context.reviewHistory.records[0].memory.remainingWork);
   assert.deepEqual(final.changes.files.map((file) => file.deletedFile ? file.baseContent : file.headContent),

@@ -20,11 +20,12 @@ function reviewDigest(value) {
 
 function integrationContext(context) {
   if (!context) return context;
+  const { changedPaths, mrSource, ...uniqueContext } = context;
   return {
-    ...context,
+    ...uniqueContext,
     perspectives: context.perspectives?.map(({ workItems = [], reviewerObservations, ...view }) => ({
       ...view,
-      workItems: workItems.map(({ key, summary, url, status }) => ({ key, summary, url, status })),
+      workItems: workItems.map(({ key }) => ({ key })),
       detailsReviewedInFilePass: true,
     })),
     reviewHistory: context.reviewHistory && {
@@ -39,7 +40,7 @@ function integrationContext(context) {
       records: context.projectActivity.records.map(({ mrUrl, headSha, title }) => ({ mrUrl, headSha, title })),
       detailsReviewedInFilePass: true,
     },
-    integrationContextPolicy: "파일별 단계에서 전체 배경 이력을 검토했습니다. 통합 단계의 업무 이슈는 제목·상태·출처, 과거 리뷰는 남은 작업, 프로젝트 활동은 MR 참조로 축약했습니다. 분할 본문 대신 구조화된 지적·인터페이스·구현·결정·검증·남은 작업을 제공합니다. 성공한 검사의 원문 로그는 실행 영수증에 있으며 명령·SHA·종료 코드·실행 결과는 유지합니다. 실패 로그와 현재 연결 Jira 요구사항·등록 명세·모든 현재 코드도 함께 제공합니다. 축약한 배경 이력에 관한 판단은 분할 검토 결과를 참고합니다.",
+    integrationContextPolicy: "파일별 단계에서 전체 배경 이력을 검토했습니다. 통합 단계의 배경 업무는 Jira 키, 과거 리뷰는 남은 작업, 프로젝트 활동은 MR 참조로 축약했습니다. MR 원문과 변경 경로는 changes와 파일별 담당 경로에 있습니다. 파일 해시는 실행기의 검토 계획에 저장돼 있고 전달 목록에는 모든 파일 경로를 유지합니다. 분할 본문 대신 구조화된 지적·인터페이스·구현·결정·검증·남은 작업을 제공합니다. 성공한 검사 로그는 실행 영수증에 있으며 명령·SHA·종료 코드·실행 결과는 유지합니다. 실패 로그와 현재 연결 Jira 요구사항·등록 명세·모든 현재 코드도 함께 제공합니다. 축약한 배경 이력에 관한 판단은 분할 검토 결과를 참고합니다.",
   };
 }
 const fail = (code) => { throw Object.assign(new UserError("Partitioned review did not complete. No partial review was published."), { code }); };
@@ -180,10 +181,14 @@ export class PartitionedReviewRunner {
     }
     const integrationFiles = files.map((file) => ({ ...file, diff: "", baseContent: file.deletedFile ? file.baseContent : null }));
     let payload = makeInput(integrationFiles, "integration", batches.length + 1, batches.length, reports, findings);
-    if (!fits(payload)) payload = { ...payload, context: integrationContext(input.context),
-      partitionReports: reports.map(({ body, ...report }) => report),
-      ...(input.verification ? { verification: { ...input.verification,
-        checks: input.verification.checks.map((check) => check.result === "passed" ? { ...check, output: "" } : check) } } : {}) };
+    if (!fits(payload)) {
+      const { mrSource, changedPaths, contextBytes, contextByteBreakdown, notesObservedAt, ...changes } = payload.changes;
+      payload = { ...payload, changes, context: integrationContext(input.context),
+        reviewPartition: { ...payload.reviewPartition, fullManifest: manifest.map(({ path }) => ({ path })) },
+        partitionReports: reports.map(({ body, ...report }) => report),
+        ...(input.verification ? { verification: { ...input.verification,
+          checks: input.verification.checks.map((check) => check.result === "passed" ? { ...check, output: "" } : check) } } : {}) };
+    }
     if (!fits(payload)) fail("review_integration_too_large");
     await checkpoint({ phase: "integration", totalBatches: batches.length, completedBatches: batches.length });
     const integrated = await receipt("integration", payload, () => this.runner.review(payload, { signal }),
