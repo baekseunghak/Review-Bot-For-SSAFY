@@ -26,7 +26,9 @@ async function installWorkerFixture() {
   const provider = process.env.REVIEWBOT_REVIEW_PROVIDER || "claude";
   const sha = "a".repeat(40);
   const baseSha = "c".repeat(40);
-  const pdfPath = "screening/tests/fixtures/disclosure/synthetic-report.pdf";
+  const pdfPath = provider === "codex"
+    ? "backend/src/test/resources/fixtures/material-encrypted-synthetic.pdf"
+    : "screening/tests/fixtures/disclosure/synthetic-report.pdf";
   const pdfBytes = Buffer.from("%PDF-1.4\n%\x00\xff\n%%EOF\n", "latin1");
   const mrUrl = "https://gitlab.example.test/team/repo/-/merge_requests/7";
   const effects = { modelCalls: 0, commentPosts: 0, mmPosts: 0, rawDiffReads: 0, unexpected: [], notes: [] };
@@ -274,8 +276,11 @@ for (const provider of ["claude", "codex"]) test(`authenticated webhook drives t
     assert.match(effects.notes[0].body, /<!-- reviewbot:[a-f0-9]{64} -->/);
     assert.match(effects.notes[0].body, /이미지 1개는 시각적으로 확인하지 않았으며/);
     assert.equal(effects.notes[0].body.match(/이미지 1개는 시각적으로 확인하지 않았으며/g).length, 1);
-    assert.match(effects.notes[0].body, /screening\/tests\/fixtures\/disclosure\/synthetic-report\.pdf` — PDF 테스트 픽스처의 내용은 별도 검토가 필요해 텍스트 리뷰에서 제외했습니다\./);
-    assert.equal(effects.notes[0].body.match(/synthetic-report\.pdf/g).length, 1);
+    const expectedPdfPath = provider === "codex"
+      ? "backend/src/test/resources/fixtures/material-encrypted-synthetic.pdf"
+      : "screening/tests/fixtures/disclosure/synthetic-report.pdf";
+    assert.ok(effects.notes[0].body.includes(`${expectedPdfPath}\` — PDF 테스트 픽스처의 내용은 별도 검토가 필요해 텍스트 리뷰에서 제외했습니다.`));
+    assert.equal(effects.notes[0].body.split(expectedPdfPath).length - 1, 1);
     const history = await mcp.tool("review_history_list", { jira_keys: ["TEST-1"] });
     assert.equal(history.isError, false); assert.equal(history.data.total, 1);
     assert.equal(history.data.records[0].headSha, SHA);

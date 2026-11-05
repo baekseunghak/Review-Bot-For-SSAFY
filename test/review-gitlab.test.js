@@ -72,6 +72,8 @@ test("PDF 제외는 양쪽 모두 일반 PDF 테스트 픽스처일 때만 적�
   await assert.rejects(read(pdfDiff), { code: "no_reviewable_text" });
   for (const [changed, contents] of [
     [{ ...pdfDiff, old_path: "docs/report.pdf", new_path: "docs/report.pdf" }],
+    [{ ...pdfDiff, old_path: "backend/src/main/resources/fixtures/report.pdf", new_path: "backend/src/main/resources/fixtures/report.pdf" }],
+    [{ ...pdfDiff, old_path: "backend/src/test/resources/report.pdf", new_path: "backend/src/test/resources/report.pdf" }],
     [{ ...pdfDiff, old_path: "docs/report.pdf", renamed_file: true }],
     [{ ...pdfDiff, old_path: "tests/fixtures/report.bin", new_path: "tests/fixtures/report.bin" }],
     [{ ...pdfDiff, b_mode: "120000" }],
@@ -83,6 +85,24 @@ test("PDF 제외는 양쪽 모두 일반 PDF 테스트 픽스처일 때만 적�
       ({ ref }) => ref === baseSha ? "previous text" : pdf],
   ]) {
     await assert.rejects(read(changed, contents), { code: "unsupported_content" });
+  }
+});
+
+test("기존 픽스처와 Java 테스트 리소스 PDF는 코드와 함께 수집하고 제외 사유를 남긴다", async () => {
+  const pdf = Buffer.from("%PDF-1.4\n%\x00\xff\n%%EOF\n", "latin1");
+  for (const pdfPath of ["test/fixtures/report.pdf", "screening/tests/fixtures/report.pdf",
+    "backend/src/test/resources/fixtures/material-encrypted-synthetic.pdf"]) {
+    const result = await fixture({
+      metadata: mr({ changes_count: "2" }),
+      diffs: [diff(), diff({ old_path: pdfPath, new_path: pdfPath, new_file: true, a_mode: "0", diff: "" })],
+      contents: ({ filePath, ref }) => filePath === pdfPath ? pdf : (ref === headSha ? "new\n" : "old\n"),
+    }).client.readReview(input);
+    assert.deepEqual(result.files.map((file) => file.newPath), ["src/api.js"]);
+    assert.equal(result.excludedPdfFixtures.length, 1);
+    assert.equal(result.excludedPdfFixtures[0].newPath, pdfPath);
+    assert.equal(result.excludedPdfFixtures[0].reason, "pdf_fixture_requires_separate_review");
+    assert.equal(result.excludedPdfFixtures[0].head.format, "pdf");
+    assert.ok(!JSON.stringify(result).includes(pdf.toString("base64")));
   }
 });
 

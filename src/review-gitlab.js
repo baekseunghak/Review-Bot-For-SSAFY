@@ -444,9 +444,9 @@ export class GitlabReviewClient {
     const format = pdfHeader ? "pdf" : imageFormat(content);
     if (extension === "pdf" || pdfHeader) {
       const eof = content.lastIndexOf("%%EOF");
-      if (!pdfHeader || !/(?:^|\/)tests?\/fixtures\/.+\.pdf$/i.test(filePath) || eof < 9
+      if (!pdfHeader || !/(?:^|\/)(?:tests?\/fixtures|src\/test\/resources\/fixtures)\/.+\.pdf$/i.test(filePath) || eof < 9
         || /[^\x00\t\n\f\r ]/.test(content.toString("latin1", eof + 5))) {
-        fail("unsupported_content", "Only PDF files with PDF header and end markers under test/fixtures or tests/fixtures can be excluded.");
+        fail("unsupported_content", "Only PDF files with PDF header and end markers under test/fixtures, tests/fixtures or src/test/resources/fixtures can be excluded.");
       }
     }
     if (format) {
