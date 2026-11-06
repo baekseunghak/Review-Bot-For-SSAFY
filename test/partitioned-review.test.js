@@ -213,9 +213,15 @@ test("나중 묶음의 일시 실패 후 같은 업무 자료의 완료 영수�
     return reviewResult(payload);
   });
   const input = inputFixture();
+  input.context.perspectives[0].reviewerObservations = { lastObservedAt: "2026-10-29T01:00:00Z",
+    examples: [{ observedAt: "2026-10-29T01:00:00Z", updatedAt: "2026-10-28T00:00:00Z", excerpt: "응답 계약을 확인하세요." }] };
+  input.context.projectActivity = { records: [{ observedAt: "2026-10-29T01:00:00Z", updatedAt: "2026-10-28T00:00:00Z" }] };
   await assert.rejects(review.review(input), { code: "runner_timeout" });
   const refreshed = structuredClone(input);
   refreshed.context.preparedAt = "2026-10-29T01:05:00Z";
+  refreshed.context.perspectives[0].reviewerObservations.lastObservedAt = "2026-10-29T01:05:00Z";
+  refreshed.context.perspectives[0].reviewerObservations.examples[0].observedAt = "2026-10-29T01:05:00Z";
+  refreshed.context.projectActivity.records[0].observedAt = "2026-10-29T01:05:00Z";
   refreshed.context.storage = { path: "C:/private/context/second.json", localPath: "C:/private/second.json", localPaths: ["C:/private/second.md"],
     markdownPath: "C:/private/second.md", nested: { storagePath: "C:/private/storage/second.json" } };
   refreshed.changes.notesObservedAt = "2026-10-29T01:05:00Z";

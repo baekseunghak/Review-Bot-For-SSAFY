@@ -190,7 +190,7 @@ worker를 끄려면 `REVIEWBOT_AUTO_REVIEW=0`으로 바꾸고 실행 프로세�
 4. 다단계 연동 뒤에는 원문 없이 파일·연동 검토의 구조화된 결과를 최종 종합합니다. 이 단계는 새 확정 결함을 만들거나 코드 위치·등급·차단 여부를 근거 없이 바꿀 수 없습니다. 이전 지적은 모두 ID별로 유지·기각을 기록하며, 기각은 앞선 원문 연동 검토에 실제 반증과 같은 코드 근거가 있을 때만 가능합니다.
 5. 최종 파일 완료 목록을 전체 manifest와 대조하고, 일반 리뷰·실행 검증·최신 SHA 검사까지 통과한 최종 댓글만 기존 흐름으로 한 번 게시합니다.
 
-`review_worker_status`의 작업별 `partitionedReview`에서 파일 수, 전체·완료 묶음 수와 `files`·`integration`·`synthesis`·`completed` 단계를 확인할 수 있습니다. 다단계 연동은 `integrationGroups`, `totalIntegrationPairs`, `completedIntegrationPairs`로 진행 상태를 표시합니다. 비공개 `<dataDir>/review-parts/<planId>/plan.json`과 파일별·연동 조합별·종합 영수증에 목록·결과를 저장합니다. 동일 SHA·맥락 버전·본문·검증·프롬프트·분할 설정이면 검증한 영수증을 재사용하고, 자료가 바뀌면 새 계획으로 검토합니다. 준비 시각과 로컬 파일 경로는 업무 자료의 변경으로 간주하지 않습니다.
+`review_worker_status`의 작업별 `partitionedReview`에서 파일 수, 전체·완료 묶음 수와 `files`·`integration`·`synthesis`·`completed` 단계를 확인할 수 있습니다. 다단계 연동은 `integrationGroups`, `totalIntegrationPairs`, `completedIntegrationPairs`로 진행 상태를 표시합니다. 비공개 `<dataDir>/review-parts/<planId>/plan.json`과 파일별·연동 조합별·종합 영수증에 목록·결과를 저장합니다. 동일 SHA·맥락 버전·본문·검증·프롬프트·분할 설정이면 검증한 영수증을 재사용하고, 자료가 바뀌면 새 계획으로 검토합니다. 준비 시각·댓글 수집 시각(`observedAt`, `lastObservedAt`)과 로컬 파일 경로는 업무 자료의 변경으로 간주하지 않습니다. 실제 댓글 내용·수정 시각, Jira 요구사항·변경 시각과 코드는 계속 맥락 버전과 검토 계획에 반영합니다. 최신 수집 시각 자체는 비공개 원본에 보존합니다.
 
 개별 파일, 원문 두 파일의 조합과 필수 맥락, 또는 구조화된 최종 종합 자체가 한도에 들어가지 않으면 명시적으로 중단합니다. 이때는 `review_file_too_large` 또는 `review_integration_too_large`로 입력 구성·MR 분리를 점검합니다. 일부 파일이나 조합을 생략해 게시하지 않습니다. 연동 그룹이 N개이면 원문 대조는 N×(N−1)÷2회이므로 큰 MR은 검토 시간과 호출량이 늘어납니다.
 

@@ -6,7 +6,7 @@ import { normalizeReviewResult, normalizeRunnerEnvelope, REVIEW_SYSTEM_PROMPT, S
 
 const bytes = (value) => Buffer.byteLength(JSON.stringify(value), "utf8");
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const volatileFields = new Set(["preparedAt", "notesObservedAt", "localPath", "localPaths", "markdownPath", "storagePath"]);
+const volatileFields = new Set(["preparedAt", "notesObservedAt", "observedAt", "lastObservedAt", "localPath", "localPaths", "markdownPath", "storagePath"]);
 function reviewDigest(value) {
   const semantic = (item) => {
     if (Array.isArray(item)) return item.map(semantic);

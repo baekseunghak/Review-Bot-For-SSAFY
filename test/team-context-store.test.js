@@ -161,6 +161,30 @@ test("weekly records and review bundles persist with paths and stable content ve
   assert.deepEqual(open().getWeekly("member-1", WEEK), weekly);
 });
 
+test("comment collection times preserve context versions while comment and business changes invalidate them", (t) => {
+  const { store } = storage(t);
+  const bundle = { issue: issue(), projectActivity: { records: [{ observedAt: FETCHED, updatedAt: FETCHED }] },
+    perspectives: [{ reviewerObservations: { lastObservedAt: FETCHED,
+      examples: [{ observedAt: FETCHED, updatedAt: FETCHED, excerpt: "응답 계약 확인" }] } }] };
+  const save = () => store.saveReviewBundle("project-1-mr-2", SHA, { bundle, markdown: "# 리뷰 맥락" });
+  const first = save();
+  const next = "2026-10-21T01:00:00Z";
+  bundle.projectActivity.records[0].observedAt = next;
+  bundle.perspectives[0].reviewerObservations.lastObservedAt = next;
+  bundle.perspectives[0].reviewerObservations.examples[0].observedAt = next;
+  const refreshed = save();
+  assert.equal(refreshed.contextVersion, first.contextVersion);
+  assert.equal(store.getReviewBundle("project-1-mr-2", SHA).perspectives[0].reviewerObservations.lastObservedAt, next);
+  bundle.perspectives[0].reviewerObservations.examples[0].excerpt = "빈 응답 처리 확인";
+  const edited = save();
+  assert.notEqual(edited.contextVersion, refreshed.contextVersion);
+  bundle.perspectives[0].reviewerObservations.examples[0].updatedAt = next;
+  const timestampEdited = save();
+  assert.notEqual(timestampEdited.contextVersion, edited.contextVersion);
+  bundle.issue.updatedAt = next;
+  assert.notEqual(save().contextVersion, timestampEdited.contextVersion);
+});
+
 test("failed Markdown staging leaves database snapshots and existing files unchanged", (t) => {
   const { store, directory } = storage(t);
   store.putMember(member());

@@ -73,7 +73,8 @@ function stableBundle(value, top = true) {
   if (Array.isArray(value)) return value.map((item) => stableBundle(item, false));
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(Object.keys(value).sort()
-    .filter((key) => !LOCAL_FIELDS.has(key) && !(top && ["path", "contextVersion", "preparedAt"].includes(key)))
+    .filter((key) => !LOCAL_FIELDS.has(key) && !["observedAt", "lastObservedAt"].includes(key)
+      && !(top && ["path", "contextVersion", "preparedAt"].includes(key)))
     .map((key) => [key, stableBundle(value[key], false)]));
 }
 
