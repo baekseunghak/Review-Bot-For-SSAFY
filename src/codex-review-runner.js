@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { UserError } from "./core.js";
-import { normalizeRunnerEnvelope, reviewResultSchema, REVIEW_SYSTEM_PROMPT } from "./review-runner.js";
+import { normalizeRunnerEnvelope, reviewResultSchema, REVIEW_SYSTEM_PROMPT, SYNTHESIS_REVIEW_PROMPT } from "./review-runner.js";
 import { runReviewProcess, serializeReviewInput, validateRunnerConfiguration, withReviewWorkspace } from "./review-runner-process.js";
 
 const DISABLED_CODE_MODE_NOTICES = new Set([
@@ -76,7 +76,7 @@ export class CodexReviewRunner {
       catch { throw Object.assign(new UserError("The review runner could not prepare its output schema."), { code: "runner_start_failed" }); }
       const args = ["exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check",
         "--sandbox", "read-only", "--json", "--output-schema", schemaFile,
-        "-c", `developer_instructions=${JSON.stringify(REVIEW_SYSTEM_PROMPT)}`,
+        "-c", `developer_instructions=${JSON.stringify(REVIEW_SYSTEM_PROMPT + (input.reviewPartition?.phase === "synthesis" ? SYNTHESIS_REVIEW_PROMPT : ""))}`,
         "-c", 'approval_policy="never"', "-c", "project_doc_max_bytes=0", "-c", 'web_search="disabled"',
         "-c", "suppress_unstable_features_warning=true",
         "-c", "skills.include_instructions=false", "-c", "skills.bundled.enabled=false",

@@ -31,7 +31,7 @@ const partitionAudit = () => ({ coveredFiles: ["src/input.js"], interfaces: [{ f
 
 test("분할 실행만 감사 배열을 요구하고 일반 리뷰 스키마·엄격한 결과 검증을 보존한다", () => {
   assert.equal(reviewResultSchema({}), REVIEW_RESULT_SCHEMA);
-  for (const phase of ["files", "integration"]) {
+  for (const phase of ["files", "integration", "synthesis"]) {
     const input = { context, reviewPartition: { phase } };
     const schema = reviewResultSchema(input);
     assert.deepEqual(schema.required, ["verdict", "body", "memory", "reviewAudit"]);
@@ -173,8 +173,8 @@ test("Claude의 모델은 명시했을 때만 전달하고 잘못된 모델 인�
   assert.equal(defaultFake.calls[0].args.includes("--model"), false);
 });
 
-test("파일·연동 분할 결과의 감사 자료를 모델 스키마와 반환값에 연결한다", async () => {
-  for (const phase of ["files", "integration"]) {
+test("파일·연동·종합 결과의 감사 자료를 모델 스키마와 반환값에 연결한다", async () => {
+  for (const phase of ["files", "integration", "synthesis"]) {
     const input = { context, changes: { files: [] }, reviewPartition: { phase } };
     const value = { ...review(), reviewAudit: partitionAudit() };
     const fake = fakeRunner({ value });

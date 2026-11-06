@@ -114,7 +114,7 @@ test("명시한 CLI 경로와 모델은 쉘 해석 없이 개별 인수로 전�
 });
 
 test("분할 파일·연동 단계는 추가 감사 스키마를 사용하고 감사 누락을 허용하지 않는다", async () => {
-  for (const phase of ["files", "integration"]) {
+  for (const phase of ["files", "integration", "synthesis"]) {
     const input = { context, changes: { files: [] }, reviewPartition: { phase } };
     const value = { ...review(), reviewAudit: { coveredFiles: ["src/input.js"], interfaces: [], findings: [], resolutions: [] } };
     const fake = fakeRunner({ expectedSchema: reviewResultSchema(input), events: [message(value), completed] });

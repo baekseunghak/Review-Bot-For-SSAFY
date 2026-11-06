@@ -12,7 +12,7 @@ const ERROR_MESSAGES = new Map(Object.entries({
   review_audit_invalid: "분할 검토의 지적·근거·완료 기록이 검증을 통과하지 못했습니다.",
   review_integration_invalid: "전체 연동 검토에서 앞선 지적의 유지·반증 근거가 빠져 게시를 중단했습니다.",
   review_file_too_large: "한 파일과 필수 맥락이 모델 입력 한도를 초과했습니다. 파일을 생략하지 않고 검토를 중단했습니다.",
-  review_integration_too_large: "전체 현재 파일과 분할 결과가 연동 검토 입력 한도를 초과했습니다. 부분 결과를 게시하지 않습니다.",
+  review_integration_too_large: "필수 맥락과 개별 연동 조합 또는 최종 종합 자료가 입력 한도를 초과했습니다. 부분 결과를 게시하지 않습니다.",
   review_receipt_invalid: "저장한 분할 검토 결과가 누락·변경돼 안전하게 재개할 수 없습니다.",
   notification_unknown: "Mattermost 알림의 도착 여부가 불명확합니다. 확인 없이 자동으로 다시 보내지 않습니다.",
   notification_setup_missing: "활성 알림 채널과 MR 작성자의 GitLab·Mattermost 계정 연결 1개가 필요합니다. 설정을 보완한 뒤 명시적으로 재시도하세요.",

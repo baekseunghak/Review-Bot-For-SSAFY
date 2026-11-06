@@ -35,14 +35,15 @@ function reviewResult(payload, { findings = [], resolutions = [] } = {}) {
   const verdict = blocking ? "hold" : "approve";
   const reasons = findings.map((finding) => `- [${finding.severity}] [정확성] [${finding.id}] \`${finding.path}:${finding.line}\` ${finding.statement}`).join("\n");
   const body = `## 리뷰 결과: ${blocking ? "보류" : "승인"}\n\n`
-    + (blocking ? `### 왜 보류인가\n입력 검증의 필수 계약을 깨는 오류를 확인했습니다.\n\n### 수정이 필요한 부분\n${reasons}\n\n` : "")
+    + (blocking ? `### 왜 보류인가\n입력 검증의 필수 계약을 깨는 오류를 확인했습니다.\n\n### 수정이 필요한 부분\n${reasons}\n\n`
+      : findings.length ? `### 비차단 결함\n${reasons}\n\n` : "")
     + "### 확인한 범위\n제공된 변경 전후 코드를 정적으로 검토했으며 테스트는 실행하지 않았습니다.\n\n"
     + "### 작업 맥락\nTEST-1 입력 검증 요구와 변경된 호출 관계를 대조했습니다.";
-  const path = pathOf(payload.changes.files[0]);
+  const path = payload.changes.files.length ? pathOf(payload.changes.files[0]) : payload.reviewPartition.requiredPaths[0];
   return normalizeRunnerEnvelope({ verdict, body, memory: {
     implementation: [{ summary: "변경된 입력과 반환 계약을 확인했습니다.", basis: "observed", evidence: [{ kind: "code", ref: `${path}:1` }] }],
     decisions: [], validations: [{ check: "테스트 실행", result: "not_run", basis: "unknown", evidence: [] }], remainingWork: [],
-  }, reviewAudit: { coveredFiles: payload.changes.files.map(pathOf),
+  }, reviewAudit: { coveredFiles: payload.reviewPartition.requiredPaths,
     interfaces: payload.reviewPartition.phase === "files" ? payload.changes.files.map((file) => ({ file: pathOf(file), summary: "입출력과 호출 관계를 변경 전후 코드에서 확인했습니다." })) : [],
     findings, resolutions } }, payload);
 }
@@ -139,14 +140,14 @@ test("통합 문자 한도는 배경 이력만 축약하고 모든 코드·현�
   assert.deepEqual(input, original);
 });
 
-test("통합 원문 자체가 문자 한도를 넘으면 부분 결과를 게시하지 않고 중단한다", async (t) => {
+test("두 원문 파일도 함께 전달할 수 없는 문자 한도에서는 부분 결과를 게시하지 않는다", async (t) => {
   const input = inputFixture();
   for (const file of input.changes.files) {
     if (file.deletedFile) file.baseContent = "x".repeat(10_000);
     else file.headContent = "x".repeat(10_000);
   }
   const { review, calls } = await setup(t);
-  review.maxInputCharacters = 30_000;
+  review.maxInputCharacters = 20_000;
   await assert.rejects(review.review(input), { code: "review_integration_too_large" });
   assert.ok(calls.every((payload) => payload.reviewPartition.phase === "files"));
 });
@@ -267,7 +268,7 @@ for (const phase of ["files", "integration"]) {
   });
 }
 
-test("전체 연동 자료가 실행 한도를 넘으면 부분 승인 대신 명시적으로 실패한다", async (t) => {
+test("전체 연동 자료가 한도를 넘으면 모든 그룹 쌍의 원문을 대조하고 종합한다", async (t) => {
   const { review, runner, calls } = await setup(t, (payload) => reviewResult(payload), { batchBytes: 32_000 });
   runner.maxInputBytes = review.maxInputBytes = 32_000;
   const input = inputFixture();
@@ -277,8 +278,156 @@ test("전체 연동 자료가 실행 한도를 넘으면 부분 승인 대신 �
     file.diff = "z".repeat(8_000);
   }
   const progress = [];
-  await assert.rejects(review.review(input, { onProgress: (value) => progress.push(value) }), { code: "review_integration_too_large" });
+  const result = await review.review(input, { onProgress: (value) => progress.push(value) });
+  assert.equal(result.verdict, "approve");
   assert.equal(calls.filter((payload) => payload.reviewPartition.phase === "files").length, 4);
-  assert.equal(calls.some((payload) => payload.reviewPartition.phase === "integration"), false);
-  assert.equal(progress.some((value) => value.phase === "completed"), false);
+  const pairs = calls.filter((payload) => payload.reviewPartition.integrationMode === "group_pair");
+  assert.ok(pairs.length > 0);
+  assert.ok(calls.every((payload) => Buffer.byteLength(JSON.stringify(payload)) <= 32_000));
+  for (const a of input.changes.files) for (const b of input.changes.files) {
+    assert.ok(pairs.some((payload) => payload.changes.files.some((file) => pathOf(file) === pathOf(a))
+      && payload.changes.files.some((file) => pathOf(file) === pathOf(b))));
+  }
+  const synthesis = calls.at(-1);
+  assert.equal(synthesis.reviewPartition.phase, "synthesis");
+  assert.equal(synthesis.changes.files.length, 0);
+  assert.deepEqual(synthesis.reviewPartition.requiredPaths, input.changes.files.map(pathOf));
+  assert.equal(synthesis.integrationReports.length, pairs.length);
+  assert.equal(progress.some((value) => value.phase === "completed"), true);
+  assert.match(result.body, /모든.*조합을 원문으로 대조/);
 });
+
+function largeInput() {
+  const input = inputFixture();
+  input.changes.files = input.changes.files.map((file) => ({
+    ...file,
+    baseContent: file.deletedFile ? "base".repeat(2_000) : file.baseContent,
+    headContent: file.deletedFile ? null : "head".repeat(2_000),
+  }));
+  return input;
+}
+
+async function setupLinks(t, behavior, options = {}) {
+  const state = await setup(t, behavior, { batchBytes: 32_000, ...options });
+  state.runner.maxInputBytes = state.review.maxInputBytes = 32_000;
+  return state;
+}
+
+test("141개 파일의 15개 검토 뒤 모든 연동 조합과 종합을 문자·바이트 한도 안에서 완료한다", async (t) => {
+  const input = inputFixture();
+  input.changes.files = Array.from({ length: 141 }, (_, index) => ({
+    ...input.changes.files[0], oldPath: `src/unit-${index}.js`, newPath: `src/unit-${index}.js`,
+    baseContent: "old source\n", headContent: "x".repeat(10_000) + "\n",
+  }));
+  const { review, runner, calls } = await setup(t, (payload) => reviewResult(payload),
+    { maxFilesPerBatch: 10, batchBytes: 1_000_000 });
+  runner.maxInputBytes = review.maxInputBytes = 2 * 1024 * 1024;
+  review.maxInputCharacters = 1_048_576;
+  const result = await review.review(input);
+  assert.equal(calls.filter((payload) => payload.reviewPartition.phase === "files").length, 15);
+  assert.equal(calls.at(-1).reviewPartition.phase, "synthesis");
+  assert.equal(calls.at(-1).reviewPartition.requiredPaths.length, 141);
+  assert.ok(calls.every((payload) => JSON.stringify(payload).length <= 1_048_576
+    && Buffer.byteLength(JSON.stringify(payload)) <= 2 * 1024 * 1024));
+  const sourcePasses = calls.filter((payload) => payload.reviewPartition.integrationMode === "group_pair");
+  for (const a of input.changes.files) for (const b of input.changes.files) {
+    assert.ok(sourcePasses.some((payload) => payload.reviewPartition.requiredPaths.includes(pathOf(a))
+      && payload.reviewPartition.requiredPaths.includes(pathOf(b))));
+  }
+  assert.match(result.body, /141\/141개/);
+  const count = calls.length;
+  await review.review(input);
+  assert.equal(calls.length, count, "Completed file, link and synthesis receipts must all resume.");
+});
+
+test("연동 검토에서 새로 확인한 지적을 종합·재개 결과에 유지한다", async (t) => {
+  const { review, calls } = await setupLinks(t, (payload) => {
+    if (payload.reviewPartition.integrationMode === "group_pair" && payload.reviewPartition.batchIndex === 1) {
+      return reviewResult(payload, { findings: [findingFor(payload)] });
+    }
+    if (payload.reviewPartition.phase === "synthesis") return reviewResult(payload, {
+      findings: payload.reviewPartition.priorFindings,
+      resolutions: payload.reviewPartition.priorFindings.map((finding) => resolutionFor(finding, "retained")),
+    });
+    return reviewResult(payload);
+  });
+  const input = largeInput();
+  const result = await review.review(input);
+  assert.equal(result.verdict, "hold");
+  assert.match(calls.at(-1).reviewPartition.priorFindings[0].id, /^i\d+:F1$/);
+  assert.doesNotMatch(result.body, /\[i\d+:F1\]/);
+  const count = calls.length;
+  assert.deepEqual(await review.review(input), result);
+  assert.equal(calls.length, count);
+});
+
+for (const invalid of ["missing_coverage", "new_finding", "unsupported_dismissal", "unsupported_downgrade"]) {
+  test(`종합 단계의 ${invalid}는 게시 가능한 결과로 반환하지 않는다`, async (t) => {
+    const { review } = await setupLinks(t, (payload) => {
+      if (payload.reviewPartition.phase === "files" && payload.reviewPartition.batchIndex === 1) {
+        return reviewResult(payload, { findings: [findingFor(payload)] });
+      }
+      const prior = payload.reviewPartition.priorFindings;
+      const result = reviewResult(payload, { findings: prior, resolutions: prior.map((finding) => resolutionFor(finding, "retained")) });
+      if (payload.reviewPartition.phase === "synthesis") {
+        if (invalid === "missing_coverage") result.reviewAudit.coveredFiles.pop();
+        if (invalid === "new_finding") return reviewResult(payload, {
+          findings: [...prior, { ...prior[0], id: "invented" }],
+          resolutions: prior.map((finding) => resolutionFor(finding, "retained")),
+        });
+        if (invalid === "unsupported_downgrade") return reviewResult(payload, {
+          findings: prior.map((finding) => ({ ...finding, blocking: false })),
+          resolutions: prior.map((finding) => resolutionFor(finding, "retained")),
+        });
+        if (invalid === "unsupported_dismissal") return reviewResult(payload, {
+          resolutions: prior.map((finding) => resolutionFor(finding, "dismissed")),
+        });
+      }
+      return result;
+    });
+    await assert.rejects(review.review(largeInput()), {
+      code: invalid === "missing_coverage" ? "review_coverage_invalid" : "review_integration_invalid",
+    });
+  });
+}
+
+test("원문 연동 검토의 반증이 있으면 종합 단계에서 기존 지적을 기각할 수 있다", async (t) => {
+  const { review } = await setupLinks(t, (payload) => {
+    if (payload.reviewPartition.phase === "files" && payload.reviewPartition.batchIndex === 1) {
+      return reviewResult(payload, { findings: [findingFor(payload)] });
+    }
+    return reviewResult(payload, { resolutions: payload.reviewPartition.priorFindings.map((finding) => resolutionFor(finding, "dismissed")) });
+  });
+  assert.equal((await review.review(largeInput())).verdict, "approve");
+});
+
+test("중간 연동 실패 뒤 완료 파일·조합을 재사용하고 남은 조합부터 재개한다", async (t) => {
+  let failed = false;
+  const { review, calls } = await setupLinks(t, (payload) => {
+    if (!failed && payload.reviewPartition.integrationMode === "group_pair" && payload.reviewPartition.batchIndex === 2) {
+      failed = true;
+      throw Object.assign(new Error("Temporary failure"), { code: "runner_timeout" });
+    }
+    return reviewResult(payload);
+  });
+  const input = largeInput();
+  await assert.rejects(review.review(input), { code: "runner_timeout" });
+  const result = await review.review(input);
+  assert.equal(result.verdict, "approve");
+  assert.equal(calls.filter((payload) => payload.reviewPartition.phase === "files").length, 4);
+  assert.equal(calls.filter((payload) => payload.reviewPartition.integrationMode === "group_pair"
+    && payload.reviewPartition.batchIndex === 1).length, 1);
+});
+
+for (const phase of ["integration", "synthesis"]) {
+  test(`다단계 ${phase} 중 커밋이 바뀌면 종합 완료를 반환하지 않는다`, async (t) => {
+    let current = true;
+    const { review } = await setupLinks(t, (payload) => {
+      if (payload.reviewPartition.phase === phase) current = false;
+      return reviewResult(payload);
+    });
+    await assert.rejects(review.review(largeInput(), { assertCurrent() {
+      if (!current) throw Object.assign(new Error("Changed head"), { code: "stale_head" });
+    } }), { code: "stale_head" });
+  });
+}

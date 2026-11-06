@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, lstat, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, win32 } from "node:path";
 import { UserError } from "./core.js";
-import { normalizeReviewResult, REVIEW_SYSTEM_PROMPT } from "./review-runner.js";
+import { normalizeReviewResult, normalizeRunnerEnvelope, REVIEW_SYSTEM_PROMPT, SYNTHESIS_REVIEW_PROMPT } from "./review-runner.js";
 
 const bytes = (value) => Buffer.byteLength(JSON.stringify(value), "utf8");
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -48,6 +48,34 @@ const filePath = (file) => file.deletedFile ? file.oldPath : file.newPath;
 const lineCount = (value) => value ? value.split(/\r?\n/).length - Number(/\n$/.test(value)) : 0;
 const location = (path, line, files) => Number.isSafeInteger(line) && line > 0 && files.some((file) => [file.oldPath, file.newPath].includes(path)
   && line <= Math.max(...[file.baseContent, file.headContent].filter((value) => typeof value === "string").map(lineCount), 0));
+
+function integrationGroups(files, makePayload, maxBytes, maxCharacters) {
+  const size = (selected) => {
+    const serialized = JSON.stringify(makePayload(selected));
+    return { bytes: Buffer.byteLength(serialized), characters: serialized.length };
+  };
+  const overhead = size([]);
+  const singles = files.map((file) => size([file]));
+  const availableBytes = maxBytes - overhead.bytes;
+  const availableCharacters = maxCharacters - overhead.characters;
+  const byteBudget = Math.min(availableBytes / 2, availableBytes - Math.max(...singles.map((n) => n.bytes - overhead.bytes)));
+  const characterBudget = Math.min(availableCharacters / 2,
+    availableCharacters - Math.max(...singles.map((n) => n.characters - overhead.characters)));
+  if (singles.some((n) => n.bytes > maxBytes || n.characters > maxCharacters)) fail("review_integration_too_large");
+  const withinGroup = (selected) => {
+    const measured = size(selected);
+    return measured.bytes - overhead.bytes <= byteBudget && measured.characters - overhead.characters <= characterBudget;
+  };
+  const groups = [];
+  let pending = [];
+  for (const file of files) {
+    if (pending.length && !withinGroup([...pending, file])) { groups.push(pending); pending = []; }
+    pending.push(file);
+    if (!withinGroup(pending)) { groups.push(pending); pending = []; }
+  }
+  if (pending.length) groups.push(pending);
+  return groups;
+}
 
 function validateAudit(result, files, phase, candidates = []) {
   const audit = result.reviewAudit;
@@ -122,7 +150,7 @@ export class PartitionedReviewRunner {
       reviewPartition: { phase, batchId: `b${String(index).padStart(3, "0")}`, batchIndex: index, totalBatches: total,
         requiredPaths: selected.map(filePath), fullManifest: manifest, priorFindings: findings,
         instructions: phase === "files" ? "이 묶음에 제공된 모든 파일의 변경 전후를 빠짐없이 검토합니다. 전체 연동의 최종 판단은 통합 단계에서 수행합니다." : "모든 현재 파일과 분할 결과를 함께 읽어 API 계약·호출 경로·데이터 정합성을 교차 검토합니다. priorFindings의 모든 ID를 resolutions에서 처리하고 유지할 지적은 동일 ID로 findings와 본문에 적습니다." },
-      ...(phase === "integration" ? { partitionReports: reports } : {}),
+      ...(phase !== "files" ? { partitionReports: reports } : {}),
     });
     const batches = [];
     let pending = [];
@@ -155,8 +183,7 @@ export class PartitionedReviewRunner {
         if (!info.isFile() || info.isSymbolicLink() || info.size > 1_000_000) fail("review_receipt_invalid");
         const saved = JSON.parse(await readFile(path, "utf8"));
         if (saved.planId !== planId || saved.payloadHash !== payloadHash || saved.resultHash !== hash(saved.result)) fail("review_receipt_invalid");
-        const normalized = normalizeReviewResult({ verdict: saved.result.verdict, body: saved.result.body, memory: saved.result.memory }, payload);
-        const restored = { ...normalized, reviewAudit: saved.result.reviewAudit };
+        const restored = normalizeRunnerEnvelope(saved.result, payload);
         validate(restored); return restored;
       } catch (error) { if (error.code !== "ENOENT") throw error; }
       const result = await evaluate(); validate(result); assertCurrent();
@@ -180,23 +207,105 @@ export class PartitionedReviewRunner {
       await checkpoint({ phase: "files", totalBatches: batches.length, completedBatches: index + 1 });
     }
     const integrationFiles = files.map((file) => ({ ...file, diff: "", baseContent: file.deletedFile ? file.baseContent : null }));
-    let payload = makeInput(integrationFiles, "integration", batches.length + 1, batches.length, reports, findings);
-    if (!fits(payload)) {
+    const compact = (payload) => {
       const { mrSource, changedPaths, contextBytes, contextByteBreakdown, notesObservedAt, ...changes } = payload.changes;
-      payload = { ...payload, changes, context: integrationContext(input.context),
-        reviewPartition: { ...payload.reviewPartition, fullManifest: manifest.map(({ path }) => ({ path })) },
+      return { ...payload, changes, context: integrationContext(input.context),
+        reviewPartition: { ...payload.reviewPartition, fullManifest: payload.changes.files.map((file) => ({ path: filePath(file) })) },
         partitionReports: reports.map(({ body, ...report }) => report),
         ...(input.verification ? { verification: { ...input.verification,
           checks: input.verification.checks.map((check) => check.result === "passed" ? { ...check, output: "" } : check) } } : {}) };
+    };
+    let payload = makeInput(integrationFiles, "integration", batches.length + 1, batches.length, reports, findings);
+    if (!fits(payload)) payload = compact(payload);
+    let integrated;
+    let integrationCoverage = "";
+    let integrationDetails = {};
+    if (fits(payload)) {
+      await checkpoint({ phase: "integration", totalBatches: batches.length, completedBatches: batches.length });
+      integrated = await receipt("integration", payload, () => this.runner.review(payload, { signal }),
+        (value) => validateAudit(value, integrationFiles, "integration", findings));
+    } else {
+      const pairPayload = (selected, candidates, index) => {
+        const value = compact(makeInput(selected, "integration", index, batches.length, reports, candidates));
+        value.reviewPartition.batchId = `i${String(index).padStart(6, "0")}`;
+        value.reviewPartition.integrationMode = "group_pair";
+        value.reviewPartition.instructions = "이 연동 묶음에 제공된 모든 원문 파일의 계약·호출·데이터 흐름을 대조합니다. 다른 파일의 인터페이스와 작업 맥락은 partitionReports를 참고하며 원문 부재를 구분합니다. 제공된 requiredPaths만 coveredFiles에 적고 priorFindings를 모두 근거와 함께 처리합니다. 새 지적은 콜론 없는 F1 같은 ID로, 기존 지적은 전달된 ID 그대로 작성합니다.";
+        return value;
+      };
+      const groups = integrationGroups(integrationFiles, (selected) => pairPayload(selected, findings, 999999),
+        this.maxInputBytes, this.maxInputCharacters);
+      const pairs = [];
+      for (let left = 0; left < groups.length; left++) {
+        for (let right = left + 1; right < groups.length; right++) pairs.push([left, right]);
+      }
+      if (!pairs.length) pairs.push([0, 0]);
+      integrationDetails = { integrationGroups: groups.length, totalIntegrationPairs: pairs.length };
+      const selectedFor = ([left, right]) => left === right ? groups[left] : [...groups[left], ...groups[right]];
+      const candidatesFor = (selected) => findings.filter((finding) => selected.some((file) =>
+        [file.oldPath, file.newPath].includes(finding.path)));
+      for (const pair of pairs) {
+        const selected = selectedFor(pair);
+        if (!fits(pairPayload(selected, candidatesFor(selected), 999999))) fail("review_integration_too_large");
+      }
+      const integrationReports = [];
+      const candidates = [...findings];
+      for (let index = 0; index < pairs.length; index++) {
+        const selected = selectedFor(pairs[index]), prior = candidatesFor(selected);
+        const pairInput = pairPayload(selected, prior, index + 1);
+        await checkpoint({ phase: "integration", totalBatches: batches.length, completedBatches: batches.length,
+          integrationGroups: groups.length, totalIntegrationPairs: pairs.length, completedIntegrationPairs: index });
+        const result = await receipt(`links-v1-${pairs[index][0]}-${pairs[index][1]}`, pairInput,
+          () => this.runner.review(pairInput, { signal }), (value) => {
+            validateAudit(value, selected, "integration", prior);
+            for (const finding of value.reviewAudit.findings) {
+              const original = prior.find((item) => item.id === finding.id);
+              if (original ? original.path !== finding.path || original.line !== finding.line : finding.id.includes(":")) {
+                fail("review_audit_invalid");
+              }
+            }
+          });
+        const known = new Set(prior.map((finding) => finding.id));
+        const qualified = result.reviewAudit.findings.map((finding) => {
+          if (known.has(finding.id)) return finding;
+          const added = { ...finding, id: `i${String(index + 1).padStart(6, "0")}:${finding.id}` };
+          candidates.push(added);
+          return added;
+        });
+        integrationReports.push({ groupPair: pairs[index], files: selected.map(filePath), verdict: result.verdict,
+          memory: result.memory, findings: qualified, resolutions: result.reviewAudit.resolutions });
+      }
+      payload = compact(makeInput([], "synthesis", pairs.length + 1, batches.length, reports, candidates));
+      payload.reviewPartition.requiredPaths = files.map(filePath);
+      payload.reviewPartition.fullManifest = manifest.map(({ path }) => ({ path }));
+      payload.reviewPartition.instructions = SYNTHESIS_REVIEW_PROMPT;
+      payload.reviewPartition.synthesisPolicyHash = hash(SYNTHESIS_REVIEW_PROMPT);
+      payload.integrationReports = integrationReports;
+      if (candidates.length > 512 || !fits(payload)) fail("review_integration_too_large");
+      await checkpoint({ phase: "synthesis", totalBatches: batches.length, completedBatches: batches.length,
+        integrationGroups: groups.length, totalIntegrationPairs: pairs.length, completedIntegrationPairs: pairs.length });
+      integrated = await receipt("synthesis-v1", payload, () => this.runner.review(payload, { signal }), (value) => {
+        validateAudit(value, integrationFiles, "integration", candidates);
+        for (const finding of value.reviewAudit.findings) {
+          const prior = candidates.find((candidate) => candidate.id === finding.id);
+          if (!prior || prior.path !== finding.path || prior.line !== finding.line) fail("review_integration_invalid");
+          const versions = [prior, ...integrationReports.flatMap((report) => report.findings.filter((item) => item.id === finding.id))];
+          if (!versions.some((item) => item.severity === finding.severity && item.blocking === finding.blocking)) fail("review_integration_invalid");
+        }
+        for (const resolution of value.reviewAudit.resolutions.filter((item) => item.disposition === "dismissed")) {
+          const supported = integrationReports.flatMap((report) => report.resolutions).some((item) =>
+            item.id === resolution.id && item.disposition === "dismissed" && resolution.evidence.every((ref) =>
+              item.evidence.some((source) => source.path === ref.path && source.line === ref.line)));
+          if (!supported) fail("review_integration_invalid");
+        }
+      });
+      integrationCoverage = ` 연동 그룹 ${groups.length}개의 모든 ${pairs.length}/${pairs.length}개 조합을 원문으로 대조하고 결과를 종합했습니다.`;
+      findings.push(...candidates.filter((candidate) => !findings.some((finding) => finding.id === candidate.id)));
     }
-    if (!fits(payload)) fail("review_integration_too_large");
-    await checkpoint({ phase: "integration", totalBatches: batches.length, completedBatches: batches.length });
-    const integrated = await receipt("integration", payload, () => this.runner.review(payload, { signal }),
-      (value) => validateAudit(value, integrationFiles, "integration", findings));
     let body = integrated.body;
     for (const finding of [...findings, ...integrated.reviewAudit.findings]) body = body.replaceAll(`[${finding.id}]`, "");
-    const result = normalizeReviewResult({ verdict: integrated.verdict, body: `${body}\n\n### 분할 검토 범위\n텍스트 파일 ${files.length}/${files.length}개를 ${batches.length}개 묶음으로 검토한 뒤 전체 현재 파일과 분할 결과의 연동 검토를 완료했습니다.`, memory: integrated.memory }, input);
-    await checkpoint({ phase: "completed", totalBatches: batches.length, completedBatches: batches.length });
+    const result = normalizeReviewResult({ verdict: integrated.verdict, body: `${body}\n\n### 분할 검토 범위\n텍스트 파일 ${files.length}/${files.length}개를 ${batches.length}개 묶음으로 검토한 뒤 전체 현재 파일과 분할 결과의 연동 검토를 완료했습니다.${integrationCoverage}`, memory: integrated.memory }, input);
+    await checkpoint({ phase: "completed", totalBatches: batches.length, completedBatches: batches.length,
+      ...integrationDetails, ...(integrationDetails.totalIntegrationPairs ? { completedIntegrationPairs: integrationDetails.totalIntegrationPairs } : {}) });
     return result;
   }
 }

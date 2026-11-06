@@ -262,6 +262,42 @@ test("한도 실패 요청의 원자적 재실행은 분할·전체 연동 뒤 �
   assert.equal(f.artifact().partitionedReview.phase, "completed");
 });
 
+test("연동 원문을 여러 번 대조하고 종합한 결과도 댓글·기록·알림으로 한 번만 연결한다", async (t) => {
+  const f = fixture(t), readReview = f.gitlab.readReview.bind(f.gitlab);
+  f.gitlab.readReview = async (...args) => {
+    const changes = await readReview(...args);
+    changes.files = Array.from({ length: 4 }, (_, index) => ({
+      ...changes.files[0], oldPath: index ? `src/api-${index}.js` : "src/api.js",
+      newPath: index ? `src/api-${index}.js` : "src/api.js",
+      baseContent: "base".repeat(1_500), headContent: "head".repeat(1_500),
+    }));
+    changes.changedPaths = changes.files.map((file) => file.newPath);
+    return changes;
+  };
+  const phases = [];
+  const runner = new PartitionedReviewRunner({ dataDir: f.contextService.dataDir, thresholdBytes: 1,
+    batchBytes: 28_000, maxFilesPerBatch: 1, runner: {
+      maxInputBytes: 28_000,
+      async review(input) {
+        phases.push(input.reviewPartition.phase);
+        return { ...result(), reviewAudit: { coveredFiles: input.reviewPartition.requiredPaths,
+          interfaces: input.reviewPartition.phase === "files" ? input.changes.files.map((file) => ({
+            file: file.newPath, summary: "호출과 응답 계약을 검토했습니다.",
+          })) : [], findings: [], resolutions: [] } };
+      },
+    } });
+  f.send();
+  assert.equal((await f.makeWorker({ runner }).runOnce()).status, "completed");
+  assert.ok(phases.filter((phase) => phase === "integration").length > 1);
+  assert.equal(phases.at(-1), "synthesis");
+  assert.equal(f.notes.length, 1);
+  assert.equal(f.calls.notifications.length, 1);
+  assert.equal(f.contextService.reviewHistory().records.length, 1);
+  assert.match(f.notes[0].body, /텍스트 파일 4\/4개/);
+  assert.equal(f.artifact().partitionedReview.completedIntegrationPairs,
+    f.artifact().partitionedReview.totalIntegrationPairs);
+});
+
 test("MR 설명의 SHA-256은 Jira 후보에서 제외하고 실제 이슈와 리뷰·게시·알림을 처리한다", async (t) => {
   const f = fixture(t);
   f.changeMr({ description: "SHA-256을 사용해 응답을 검증합니다. OTHER-12는 외부 참조입니다." });
