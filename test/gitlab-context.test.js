@@ -29,6 +29,13 @@ test("작업 키는 제목·설명·브랜치에서 중복 없이 수집한다",
   assert.deepEqual(extractIssueKeys("TEAM-1 TEAM-1", "NEXT_2-90", null, "foo-3"), ["TEAM-1", "NEXT_2-90"]);
 });
 
+test("MR 설명에서 0으로 시작하는 번호는 Jira 키 후보에서 제외한다", async () => {
+  const context = await readMrContext(mrUrl, {
+    runImpl: runner({ mr: metadata({ description: "A-01 B-0 TEAM-13 TEAM-12" }) }),
+  });
+  assert.deepEqual(context.issueKeys, ["TEAM-12", "TEAM-13", "TEAM-14"]);
+});
+
 test("댓글 링크는 허용하고 맥락 저장에는 fragment 없는 MR 주소를 사용한다", async () => {
   const noteUrl = `${mrUrl}/#note_123`;
   assert.deepEqual(parseGitlabMrUrl(noteUrl), parseGitlabMrUrl(mrUrl));

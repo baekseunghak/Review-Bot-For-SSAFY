@@ -59,7 +59,7 @@ function headOf(mr) {
 }
 
 export function extractIssueKeys(...texts) {
-  return [...new Set(texts.flatMap((text) => String(text ?? "").match(/\b[A-Z][A-Z0-9_]*-\d+\b/g) ?? []))];
+  return [...new Set(texts.flatMap((text) => String(text ?? "").match(/\b[A-Z][A-Z0-9_]*-[1-9]\d*\b/g) ?? []))];
 }
 
 export async function readMrHeadSha(mrUrl, { runImpl = run } = {}) {
