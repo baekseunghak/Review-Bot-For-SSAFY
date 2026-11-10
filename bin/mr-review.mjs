@@ -30,9 +30,10 @@ export function usedHoldCategories(body) {
 }
 
 // 보류 항목은 실제로 읽은 코드를 가리켜야 한다. 위치를 못 대면 확인한 게 아니라 추측이다.
-// 백틱으로 감싼 `경로/파일.확장자` 또는 `경로/파일.확장자:줄` 을 인용으로 인정한다.
+// 실행기가 만든 커밋 링크에는 확장자가 없는 파일도 포함된다.
 export function citedLocations(body) {
-  return [...String(body).matchAll(/`([^`\n]*\.[A-Za-z0-9]+(?::\d+)?)`/g)].map((match) => match[1]);
+  return [...String(body).matchAll(/\[`([^`\n]+:\d+)`\]\(<https?:\/\/[^<>\s]+\/-\/blob\/(?:[a-f0-9]{40}|[a-f0-9]{64})\/[^<>\s]+#L\d+>\)|`([^`\n]*\.[A-Za-z0-9]+(?::\d+)?)`/g)]
+    .map((match) => match[1] ?? match[2]);
 }
 
 // 심각도와 미확인 표시. 태그는 지적 항목의 첫 줄에만 붙인다(확인한 범위에는 쓰지 않는다).

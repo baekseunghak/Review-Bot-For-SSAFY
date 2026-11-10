@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { mkdir, lstat, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, win32 } from "node:path";
 import { UserError } from "./core.js";
-import { normalizeReviewResult, normalizeRunnerEnvelope, REVIEW_SYSTEM_PROMPT, SYNTHESIS_REVIEW_PROMPT } from "./review-runner.js";
+import { normalizeReviewResult, normalizeRunnerEnvelope, REVIEW_SYSTEM_PROMPT, SYNTHESIS_REVIEW_PROMPT, REVIEW_EVIDENCE_PROMPT } from "./review-runner.js";
+import { ReviewEvidence, REVIEW_EVIDENCE_VERSION } from "./review-evidence.js";
 
-const bytes = (value) => Buffer.byteLength(JSON.stringify(value), "utf8");
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const volatileFields = new Set(["preparedAt", "notesObservedAt", "observedAt", "lastObservedAt", "localPath", "localPaths", "markdownPath", "storagePath"]);
 function reviewDigest(value) {
@@ -40,7 +40,7 @@ function integrationContext(context) {
       records: context.projectActivity.records.map(({ mrUrl, headSha, title }) => ({ mrUrl, headSha, title })),
       detailsReviewedInFilePass: true,
     },
-    integrationContextPolicy: "파일별 단계에서 전체 배경 이력을 검토했습니다. 통합 단계의 배경 업무는 Jira 키, 과거 리뷰는 남은 작업, 프로젝트 활동은 MR 참조로 축약했습니다. MR 원문과 변경 경로는 changes와 파일별 담당 경로에 있습니다. 파일 해시는 실행기의 검토 계획에 저장돼 있고 전달 목록에는 모든 파일 경로를 유지합니다. 분할 본문 대신 구조화된 지적·인터페이스·구현·결정·검증·남은 작업을 제공합니다. 성공한 검사 로그는 실행 영수증에 있으며 명령·SHA·종료 코드·실행 결과는 유지합니다. 실패 로그와 현재 연결 Jira 요구사항·등록 명세·모든 현재 코드도 함께 제공합니다. 축약한 배경 이력에 관한 판단은 분할 검토 결과를 참고합니다.",
+    integrationContextPolicy: "파일별 단계에서 전체 배경 이력을 검토했습니다. 통합 단계의 배경 업무는 Jira 키, 과거 리뷰는 남은 작업, 프로젝트 활동은 MR 참조로 축약했습니다. MR 원문과 변경 경로는 changes와 파일별 담당 경로에 있습니다. 파일 해시는 실행기의 검토 계획에 저장돼 있고 전달 목록에는 모든 파일 경로를 유지합니다. 분할 본문 대신 구조화된 지적·인터페이스·구현·결정·검증·남은 작업을 제공합니다. 성공한 검사 로그는 실행 영수증에 있으며 명령·SHA·종료 코드·실행 결과는 유지합니다. 실패 로그와 현재 연결 Jira 요구사항·등록 명세도 함께 제공합니다. 축약한 배경 이력에 관한 판단은 분할 검토 결과를 참고합니다.",
   };
 }
 const fail = (code) => { throw Object.assign(new UserError("Partitioned review did not complete. No partial review was published."), { code }); };
@@ -48,6 +48,7 @@ const filePath = (file) => file.deletedFile ? file.oldPath : file.newPath;
 const lineCount = (value) => value ? value.split(/\r?\n/).length - Number(/\n$/.test(value)) : 0;
 const location = (path, line, files) => Number.isSafeInteger(line) && line > 0 && files.some((file) => [file.oldPath, file.newPath].includes(path)
   && line <= Math.max(...[file.baseContent, file.headContent].filter((value) => typeof value === "string").map(lineCount), 0));
+const sameLocation = (a, b) => a.evidenceId ? a.evidenceId === b.evidenceId : a.path === b.path && a.line === b.line;
 
 function integrationGroups(files, makePayload, maxBytes, maxCharacters) {
   const size = (selected) => {
@@ -77,7 +78,7 @@ function integrationGroups(files, makePayload, maxBytes, maxCharacters) {
   return groups;
 }
 
-function validateAudit(result, files, phase, candidates = []) {
+function validateAudit(result, files, phase, candidates = [], evidenceMode = false) {
   const audit = result.reviewAudit;
   const paths = files.map(filePath);
   if (!audit || !Array.isArray(audit.coveredFiles) || audit.coveredFiles.length !== paths.length
@@ -90,10 +91,10 @@ function validateAudit(result, files, phase, candidates = []) {
     if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}(?::[A-Za-z][A-Za-z0-9_-]{0,31})?$/.test(finding.id ?? "") || ids.has(finding.id)
       || (phase === "files" && finding.id.includes(":"))
       || !["위험", "주의", "미미"].includes(finding.severity) || typeof finding.blocking !== "boolean"
-      || (finding.blocking && finding.severity === "미미") || !location(finding.path, finding.line, files)
+      || (finding.blocking && finding.severity === "미미") || (!evidenceMode && !location(finding.path, finding.line, files))
       || typeof finding.statement !== "string" || !finding.statement.trim()
       || !result.body.split(/\r?\n/).some((line) => line.includes(`[${finding.id}]`) && line.includes(`[${finding.severity}]`)
-        && line.includes(`${finding.path}:${finding.line}`) && /\[(정확성|안전|데이터|계약|구현)\]/.test(line))) fail("review_audit_invalid");
+        && (evidenceMode || line.includes(`${finding.path}:${finding.line}`)) && /\[(정확성|안전|데이터|계약|구현)\]/.test(line))) fail("review_audit_invalid");
     ids.add(finding.id);
   }
   if ((result.verdict === "hold") !== audit.findings.some((finding) => finding.blocking)) fail("review_audit_invalid");
@@ -106,21 +107,27 @@ function validateAudit(result, files, phase, candidates = []) {
     for (const candidate of candidates) {
       const resolution = audit.resolutions.find((item) => item.id === candidate.id);
       if (!resolution || !["retained", "dismissed"].includes(resolution.disposition) || typeof resolution.reason !== "string" || resolution.reason.trim().length < 16
-        || !Array.isArray(resolution.evidence) || !resolution.evidence.length || resolution.evidence.some((ref) => !location(ref.path, ref.line, files))
+        || !Array.isArray(resolution.evidence) || !resolution.evidence.length
+        || (!evidenceMode && resolution.evidence.some((ref) => !location(ref.path, ref.line, files)))
         || (resolution.disposition === "retained") !== ids.has(candidate.id)) fail("review_integration_invalid");
+      if (evidenceMode && resolution.disposition === "retained"
+        && !sameLocation(candidate, audit.findings.find((finding) => finding.id === candidate.id))) fail("review_integration_invalid");
     }
   }
   return audit;
 }
 
 export class PartitionedReviewRunner {
-  constructor({ runner, dataDir, thresholdBytes = 1_000_000, batchBytes = 1_000_000, maxFilesPerBatch = 12 }) {
-    Object.assign(this, { runner, dataDir, thresholdBytes, batchBytes, maxFilesPerBatch });
+  constructor({ runner, dataDir, gitlab, thresholdBytes = 1_000_000, batchBytes = 1_000_000, maxFilesPerBatch = 12 }) {
+    Object.assign(this, { runner, dataDir, gitlab, thresholdBytes, batchBytes, maxFilesPerBatch });
     this.maxInputBytes = runner.maxInputBytes ?? 2 * 1024 * 1024;
     this.maxInputCharacters = runner.maxInputCharacters ?? Infinity;
   }
 
   async review(input, { signal, assertCurrent = () => {}, onProgress = () => {} } = {}) {
+    const evidence = this.gitlab ? new ReviewEvidence(input.changes, this.gitlab) : null;
+    const project = (payload) => evidence && !payload.codeEvidence ? evidence.project(payload) : payload;
+    const validationInput = (payload) => evidence ? { ...payload, changes: { ...payload.changes, files: undefined } } : payload;
     const run = async (payload) => {
       try { return await this.runner.review(payload, { signal }); }
       catch (error) {
@@ -130,11 +137,17 @@ export class PartitionedReviewRunner {
       }
     };
     const fits = (payload, byteLimit = this.maxInputBytes) => {
-      const serialized = JSON.stringify(payload);
+      const serialized = JSON.stringify(project(payload));
       return Buffer.byteLength(serialized) <= byteLimit && serialized.length <= this.maxInputCharacters;
     };
-    if (bytes(input) <= Math.min(this.thresholdBytes, this.maxInputBytes) && (input.changes.contextBytes ?? 0) <= this.thresholdBytes) {
-      return run(input);
+    const evaluate = async (payload) => {
+      if (!evidence) return { result: await run(payload) };
+      const { result, saved } = await evidence.evaluate(payload, run, { assertCurrent, fits });
+      return { result: normalizeRunnerEnvelope(result, validationInput(payload)), saved };
+    };
+    if (fits(input, Math.min(this.thresholdBytes, this.maxInputBytes))
+      && (evidence ? input.changes.files.length <= this.maxFilesPerBatch : (input.changes.contextBytes ?? 0) <= this.thresholdBytes)) {
+      return (await evaluate(input)).result;
     }
     const files = input.changes.files;
     if (!Array.isArray(files) || !files.length || files.length > 512 || new Set(files.map(filePath)).size !== files.length) fail("review_partition_invalid");
@@ -145,7 +158,8 @@ export class PartitionedReviewRunner {
     const identity = { version: 1, planner: [this.thresholdBytes, this.batchBytes, this.maxFilesPerBatch, this.maxInputBytes, this.maxInputCharacters],
       contextVersion: input.context?.contextVersion, contextHash: reviewDigest(input.context),
       changesHash: reviewDigest(stableChanges), verificationHash: hash(input.verification ?? null), promptHash: hash(REVIEW_SYSTEM_PROMPT),
-      runner: [this.runner.constructor.name, this.runner.command, this.runner.model], manifest };
+      runner: [this.runner.constructor.name, this.runner.command, this.runner.model], manifest,
+      ...(evidence ? { evidenceVersion: REVIEW_EVIDENCE_VERSION, evidencePromptHash: hash(REVIEW_EVIDENCE_PROMPT) } : {}) };
     const planId = hash(identity);
     const root = join(this.dataDir, "review-parts");
     const directory = join(root, planId);
@@ -184,18 +198,20 @@ export class PartitionedReviewRunner {
     }
     const reports = [], findings = [];
     const receipt = async (name, payload, validate) => {
-      const path = join(directory, `${name}.json`), payloadHash = reviewDigest(payload);
+      const path = join(directory, `${name}.json`), payloadHash = reviewDigest(project(payload));
       assertCurrent();
       try {
         const info = await lstat(path);
         if (!info.isFile() || info.isSymbolicLink() || info.size > 1_000_000) fail("review_receipt_invalid");
         const saved = JSON.parse(await readFile(path, "utf8"));
         if (saved.planId !== planId || saved.payloadHash !== payloadHash || saved.resultHash !== hash(saved.result)) fail("review_receipt_invalid");
-        const restored = normalizeRunnerEnvelope(saved.result, payload);
+        const source = evidence ? await evidence.restore(saved.result, payload, assertCurrent) : saved.result;
+        const restored = normalizeRunnerEnvelope(source, validationInput(payload));
         validate(restored); return restored;
       } catch (error) { if (error.code !== "ENOENT") throw error; }
-      const result = await run(payload); validate(result); assertCurrent();
-      const encoded = JSON.stringify({ planId, payloadHash, resultHash: hash(result), result });
+      const { result, saved } = await evaluate(payload); validate(result); assertCurrent();
+      const stored = saved ?? result;
+      const encoded = JSON.stringify({ planId, payloadHash, resultHash: hash(stored), result: stored });
       if (Buffer.byteLength(encoded) > 1_000_000) fail("review_receipt_invalid");
       await writeFile(path, encoded, { flag: "wx", mode: 0o600 });
       return result;
@@ -204,7 +220,7 @@ export class PartitionedReviewRunner {
     for (let index = 0; index < batches.length; index++) {
       const payload = makeInput(batches[index], "files", index + 1, batches.length);
       const result = await receipt(`batch-${index + 1}`, payload,
-        (value) => validateAudit(value, batches[index], "files"));
+        (value) => validateAudit(value, batches[index], "files", [], Boolean(evidence)));
       const prefix = `b${String(index + 1).padStart(3, "0")}`;
       const qualified = result.reviewAudit.findings.map((finding) => ({ ...finding, id: `${prefix}:${finding.id}` }));
       let qualifiedBody = result.body;
@@ -231,7 +247,7 @@ export class PartitionedReviewRunner {
     if (fits(payload)) {
       await checkpoint({ phase: "integration", totalBatches: batches.length, completedBatches: batches.length });
       integrated = await receipt("integration", payload,
-        (value) => validateAudit(value, integrationFiles, "integration", findings));
+        (value) => validateAudit(value, integrationFiles, "integration", findings, Boolean(evidence)));
     } else {
       const pairPayload = (selected, candidates, index) => {
         const value = compact(makeInput(selected, "integration", index, batches.length, reports, candidates));
@@ -240,7 +256,12 @@ export class PartitionedReviewRunner {
         value.reviewPartition.instructions = "이 연동 묶음에 제공된 모든 원문 파일의 계약·호출·데이터 흐름을 대조합니다. 다른 파일의 인터페이스와 작업 맥락은 partitionReports를 참고하며 원문 부재를 구분합니다. 제공된 requiredPaths만 coveredFiles에 적고 priorFindings를 모두 근거와 함께 처리합니다. 새 지적은 콜론 없는 F1 같은 ID로, 기존 지적은 전달된 ID 그대로 작성합니다.";
         return value;
       };
-      const groups = integrationGroups(integrationFiles, (selected) => pairPayload(selected, findings, 999999),
+      const originFiles = new Map(reports.flatMap((report) => report.findings.map((finding) => [finding.id, report.files])));
+      const changedPaths = new Set(files.flatMap((file) => [file.oldPath, file.newPath]));
+      const candidatesFor = (selected) => findings.filter((finding) => selected.some((file) =>
+        [file.oldPath, file.newPath].includes(finding.path)
+        || (evidence && !changedPaths.has(finding.path) && originFiles.get(finding.id).includes(filePath(file)))));
+      const groups = integrationGroups(integrationFiles, (selected) => project(pairPayload(selected, evidence ? candidatesFor(selected) : findings, 999999)),
         this.maxInputBytes, this.maxInputCharacters);
       const pairs = [];
       for (let left = 0; left < groups.length; left++) {
@@ -249,8 +270,6 @@ export class PartitionedReviewRunner {
       if (!pairs.length) pairs.push([0, 0]);
       integrationDetails = { integrationGroups: groups.length, totalIntegrationPairs: pairs.length };
       const selectedFor = ([left, right]) => left === right ? groups[left] : [...groups[left], ...groups[right]];
-      const candidatesFor = (selected) => findings.filter((finding) => selected.some((file) =>
-        [file.oldPath, file.newPath].includes(finding.path)));
       for (const pair of pairs) {
         const selected = selectedFor(pair);
         if (!fits(pairPayload(selected, candidatesFor(selected), 999999))) fail("review_integration_too_large");
@@ -263,10 +282,10 @@ export class PartitionedReviewRunner {
         await checkpoint({ phase: "integration", totalBatches: batches.length, completedBatches: batches.length,
           integrationGroups: groups.length, totalIntegrationPairs: pairs.length, completedIntegrationPairs: index });
         const result = await receipt(`links-v1-${pairs[index][0]}-${pairs[index][1]}`, pairInput, (value) => {
-          validateAudit(value, selected, "integration", prior);
+          validateAudit(value, selected, "integration", prior, Boolean(evidence));
           for (const finding of value.reviewAudit.findings) {
             const original = prior.find((item) => item.id === finding.id);
-            if (original ? original.path !== finding.path || original.line !== finding.line : finding.id.includes(":")) {
+            if (original ? !sameLocation(original, finding) : finding.id.includes(":")) {
               fail("review_audit_invalid");
             }
           }
@@ -291,26 +310,27 @@ export class PartitionedReviewRunner {
       await checkpoint({ phase: "synthesis", totalBatches: batches.length, completedBatches: batches.length,
         integrationGroups: groups.length, totalIntegrationPairs: pairs.length, completedIntegrationPairs: pairs.length });
       integrated = await receipt("synthesis-v1", payload, (value) => {
-        validateAudit(value, integrationFiles, "integration", candidates);
+        validateAudit(value, integrationFiles, "integration", candidates, Boolean(evidence));
         for (const finding of value.reviewAudit.findings) {
           const prior = candidates.find((candidate) => candidate.id === finding.id);
-          if (!prior || prior.path !== finding.path || prior.line !== finding.line) fail("review_integration_invalid");
+          if (!prior || !sameLocation(prior, finding)) fail("review_integration_invalid");
           const versions = [prior, ...integrationReports.flatMap((report) => report.findings.filter((item) => item.id === finding.id))];
           if (!versions.some((item) => item.severity === finding.severity && item.blocking === finding.blocking)) fail("review_integration_invalid");
         }
         for (const resolution of value.reviewAudit.resolutions.filter((item) => item.disposition === "dismissed")) {
           const supported = integrationReports.flatMap((report) => report.resolutions).some((item) =>
             item.id === resolution.id && item.disposition === "dismissed" && resolution.evidence.every((ref) =>
-              item.evidence.some((source) => source.path === ref.path && source.line === ref.line)));
+              item.evidence.some((source) => sameLocation(source, ref))));
           if (!supported) fail("review_integration_invalid");
         }
       });
-      integrationCoverage = ` 연동 그룹 ${groups.length}개의 모든 ${pairs.length}/${pairs.length}개 조합을 원문으로 대조하고 결과를 종합했습니다.`;
+      integrationCoverage = ` 연동 그룹 ${groups.length}개의 모든 ${pairs.length}/${pairs.length}개 조합을 ${evidence ? "제공된 코드 근거로" : "원문으로"} 대조하고 결과를 종합했습니다.`;
       findings.push(...candidates.filter((candidate) => !findings.some((finding) => finding.id === candidate.id)));
     }
     let body = integrated.body;
     for (const finding of [...findings, ...integrated.reviewAudit.findings]) body = body.replaceAll(`[${finding.id}]`, "");
-    const result = normalizeReviewResult({ verdict: integrated.verdict, body: `${body}\n\n### 분할 검토 범위\n텍스트 파일 ${files.length}/${files.length}개를 ${batches.length}개 묶음으로 검토한 뒤 전체 현재 파일과 분할 결과의 연동 검토를 완료했습니다.${integrationCoverage}`, memory: integrated.memory }, input);
+    const scope = evidence ? "각 파일의 변경 구간과 제공된 보충 문맥을 검토하고 연동 결과를 종합했습니다." : "전체 현재 파일과 분할 결과의 연동 검토를 완료했습니다.";
+    const result = normalizeReviewResult({ verdict: integrated.verdict, body: `${body}\n\n### 분할 검토 범위\n텍스트 파일 ${files.length}/${files.length}개를 ${batches.length}개 묶음으로 나눠 ${scope}${integrationCoverage}`, memory: integrated.memory }, validationInput(input));
     await checkpoint({ phase: "completed", totalBatches: batches.length, completedBatches: batches.length,
       ...integrationDetails, ...(integrationDetails.totalIntegrationPairs ? { completedIntegrationPairs: integrationDetails.totalIntegrationPairs } : {}) });
     return result;

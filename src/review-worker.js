@@ -121,7 +121,7 @@ export class ReviewWorker {
             this.#assertHead(await this.gitlab.readHead(job), job.headSha);
             checkpoint("reviewing", { verification: verificationReference(verification) });
           }
-          const options = { context: bundle, changes, verification };
+          const options = { context: bundle, changes: this.runner.gitlab ? { ...changes, files: undefined } : changes, verification };
           let result = normalizeReviewResult(await this.runner.review({ context: bundle, changes,
             ...(verification ? { verification } : {}) }, { signal: controller.signal, assertCurrent: current,
               onProgress: (partitionedReview) => checkpoint("reviewing", { partitionedReview }) }), options);
@@ -215,7 +215,7 @@ export function createConfiguredReviewWorker({ inbox, contextService, mattermost
   return new ReviewWorker({ inbox, contextService,
     gitlab, verificationService: new ReviewVerificationService({ gitlab, dataDir: settings.dataDir,
       ...(settings.validationConfigPath ? { configPath: settings.validationConfigPath } : {}) }),
-    runner: new PartitionedReviewRunner({ dataDir: settings.dataDir,
+    runner: new PartitionedReviewRunner({ dataDir: settings.dataDir, gitlab,
       runner: new Runner({ command: settings.command, model: settings.model, timeoutMs: settings.timeoutMs }) }),
     notifier: new MattermostReviewNotifier({ service: mattermost, channelName: settings.channelName }),
     intervalMs: settings.intervalMs });

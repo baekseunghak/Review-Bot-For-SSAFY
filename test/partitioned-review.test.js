@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { PartitionedReviewRunner } from "../src/partitioned-review.js";
 import { normalizeRunnerEnvelope } from "../src/review-runner.js";
+import { ReviewEvidence } from "../src/review-evidence.js";
 
 const pathOf = (file) => file.deletedFile ? file.oldPath : file.newPath;
 
@@ -63,6 +64,105 @@ async function setup(t, behavior = (payload) => reviewResult(payload), options =
   const review = new PartitionedReviewRunner({ runner, dataDir, thresholdBytes: 1, batchBytes: 50_000, maxFilesPerBatch: 1, ...options });
   return { review, runner, calls, dataDir };
 }
+
+function evidenceInput() {
+  const input = inputFixture();
+  input.changes.baseSha = "c".repeat(40);
+  input.changes.mrUrl = "https://gitlab.example.test/team/repo/-/merge_requests/81";
+  const renamed = input.changes.files[1];
+  renamed.newPath = "src/renamed file.js";
+  renamed.baseContent = Array.from({ length: 300 }, (_, i) => `base-${i + 1}\r\n`).join("");
+  renamed.headContent = Array.from({ length: 300 }, (_, i) => `head-${i + 1}\n`).join("");
+  renamed.diff = "@@ -221 +247 @@\n-base-221\n+head-247\n";
+  return input;
+}
+
+test("변경 구간의 원래 줄 번호와 양쪽 커밋을 보존하고 제공한 근거만 링크로 만든다", () => {
+  const input = evidenceInput();
+  const [first, renamed] = input.changes.files;
+  const evidence = new ReviewEvidence(input.changes, {});
+  const projected = evidence.project({ ...input, changes: { ...input.changes, files: [renamed] } });
+  const [base, head] = projected.codeEvidence;
+  assert.deepEqual([base.path, base.sha, base.startLine, base.endLine, base.lines[8]],
+    [renamed.oldPath, input.changes.baseSha, 213, 229, "221 | base-221"]);
+  assert.deepEqual([head.path, head.sha, head.startLine, head.endLine, head.lines[8]],
+    [renamed.newPath, input.changes.headSha, 239, 255, "247 | head-247"]);
+  assert.ok(!JSON.stringify(projected).includes("head-300"));
+  const rendered = evidence.render({ body: `[[${base.id}]] [[${head.id}]]` }, projected).body;
+  assert.ok(rendered.includes(`/-/blob/${base.sha}/src/old.js#L213`));
+  assert.ok(rendered.includes(`/-/blob/${head.sha}/src/renamed%20file.js#L239`));
+  const other = evidence.project({ ...input, changes: { ...input.changes, files: [first] } }).codeEvidence[0];
+  for (const body of [`[[${other.id}]]`, "[[E00000000000000000000]]", "`src/old.js:221`",
+    "[직접 만든 링크](../blob/main/src/old.js#L221)", "<a href='../blob/main/src/old.js#L221'>링크</a>"]) {
+    assert.throws(() => evidence.render({ body }, projected), { code: "review_evidence_invalid" });
+  }
+});
+
+test("분할 검토와 재개에서 같은 SHA의 보충 문맥을 재검증하고 결과의 근거를 유지한다", async (t) => {
+  const input = evidenceInput();
+  input.changes.files.splice(2);
+  for (let index = 0; index < 4; index++) {
+    const oldPath = `src/long-${index}.js`, base = "a".repeat(14_000), head = "b".repeat(14_000);
+    input.changes.files.push({ ...input.changes.files[0], oldPath, newPath: oldPath,
+      baseContent: base, headContent: head, diff: `@@ -1 +1 @@\n-${base}\n+${head}` });
+  }
+  const path = "scripts/entry point";
+  const sourceCalls = [];
+  const gitlab = { async file(...args) { sourceCalls.push(args); return "#!/bin/sh\nwrite_unchecked_input\n"; } };
+  const { review, calls } = await setup(t, (payload) => {
+    const { phase, priorFindings, requiredPaths } = payload.reviewPartition;
+    const findingBatch = phase === "files" && requiredPaths.includes("src/input.js");
+    const proof = payload.codeEvidence.find((entry) => entry.path === path && entry.side === "head");
+    if (findingBatch && !proof) return { review: null, contextRequests: [
+      { path, side: "head", startLine: 2, endLine: 2 }, { path, side: "base", startLine: 1, endLine: 1 },
+    ] };
+    const findings = findingBatch ? [{ id: "F1", severity: "주의", blocking: true,
+      evidenceId: proof.id, statement: "빈 입력도 저장되어 필수 입력 계약을 위반합니다." }] : priorFindings;
+    const resolutions = priorFindings.map((finding) => ({ id: finding.id, disposition: "retained",
+      reason: "호출부에서도 빈 입력을 저장 전에 거부하지 않습니다.", evidence: [finding.evidenceId] }));
+    const baseline = reviewResult(payload);
+    if (findingBatch && !payload.invalidCodeEvidence) {
+      return { review: { ...baseline, body: "[[E00000000000000000000]]" }, contextRequests: [] };
+    }
+    const body = findings.length ? baseline.body.replace("승인", "보류").replace("### 확인한 범위",
+      "### 왜 보류인가\n필수 입력을 검증하지 않습니다.\n\n### 수정이 필요한 부분\n"
+      + findings.map((finding) => `- [주의] [정확성] [${finding.id}] [[${finding.evidenceId}]] ${finding.statement}`).join("\n")
+      + "\n\n### 확인한 범위") : baseline.body;
+    baseline.memory.implementation[0].evidence[0].ref = (proof ?? payload.codeEvidence[0]).id;
+    return { review: { ...baseline, verdict: findings.length ? "hold" : "approve", body,
+      reviewAudit: { ...baseline.reviewAudit, findings, resolutions } }, contextRequests: [] };
+  }, { gitlab });
+  const first = await review.review(input);
+  const expected = [[input.changes.projectId, path, input.changes.headSha], [input.changes.projectId, path, input.changes.baseSha]];
+  assert.deepEqual(sourceCalls, expected);
+  assert.equal(first.verdict, "hold");
+  assert.ok(first.body.includes(`/-/blob/${input.changes.headSha}/scripts/entry%20point#L2`));
+  assert.ok(!first.body.includes("[b001:F1]"));
+  assert.equal(calls.filter((call) => call.invalidCodeEvidence).length, 1);
+  const synthesis = calls.find((call) => call.reviewPartition.phase === "synthesis");
+  assert.ok(synthesis.codeEvidence.some((entry) => entry.path === path));
+  assert.ok(synthesis.codeEvidence.every((entry) => !entry.lines));
+  const callCount = calls.length;
+  assert.deepEqual(await review.review(input), first);
+  assert.equal(calls.length, callCount);
+  assert.deepEqual(sourceCalls, [...expected, ...expected]);
+});
+
+test("보충 조회의 경로·커밋 선택과 줄 범위를 제한한다", async () => {
+  const input = evidenceInput();
+  let calls = 0;
+  const evidence = new ReviewEvidence(input.changes, { async file() { calls++; return "only line\n"; } });
+  const request = { path: "src/unchanged.js", side: "head", startLine: 1, endLine: 2 };
+  const current = () => {};
+  for (const change of [{ path: "../outside.js" }, { sha: "d".repeat(40) }, { endLine: 33 }]) {
+    await assert.rejects(evidence.expand([{ ...request, ...change }], current), { code: "review_evidence_invalid" });
+  }
+  assert.equal(calls, 0);
+  const { added, unavailable } = await evidence.expand([request], current);
+  assert.deepEqual(added, []);
+  assert.deepEqual(unavailable, [request]);
+  assert.equal(calls, 1);
+});
 
 test("범위를 벗어난 줄은 같은 묶음만 교정하고 검증된 묶음의 결과는 재사용한다", async (t) => {
   const input = inputFixture();

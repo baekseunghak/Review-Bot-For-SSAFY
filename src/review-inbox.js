@@ -39,6 +39,7 @@ const ERROR_MESSAGES = new Map(Object.entries({
   review_sections_invalid: "리뷰 본문의 필수 섹션·판정·지적 분류가 요구 형식과 다릅니다.",
   review_context_invalid: "리뷰 본문에서 준비된 작업 맥락의 근거를 확인하지 못했습니다.",
   review_locations_invalid: "확정한 지적의 파일·줄 위치가 제공된 실제 코드와 맞지 않습니다.",
+  review_evidence_invalid: "리뷰가 제공된 코드 근거 ID나 보충 문맥 요청 규칙과 일치하지 않습니다.",
   review_memory_invalid: "누적 리뷰 기록의 형식이나 출처 근거가 요구 조건과 다릅니다.",
   review_test_claim_invalid: "직접 실행하지 않은 검증의 성공·실패를 직접 확인한 결과로 기록했습니다.",
   verification_receipt_invalid: "저장된 실행 검증 영수증이 없거나 변경됐습니다. 원본 파일과 해시를 확인한 뒤 조치하세요.",

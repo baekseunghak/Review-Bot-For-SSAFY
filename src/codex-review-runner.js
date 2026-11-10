@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { UserError } from "./core.js";
-import { normalizeRunnerEnvelope, reviewResultSchema, REVIEW_SYSTEM_PROMPT, SYNTHESIS_REVIEW_PROMPT, REVIEW_LOCATION_RETRY_PROMPT } from "./review-runner.js";
+import { normalizeRunnerEnvelope, reviewResultSchema, REVIEW_SYSTEM_PROMPT, SYNTHESIS_REVIEW_PROMPT, REVIEW_LOCATION_RETRY_PROMPT, REVIEW_EVIDENCE_PROMPT } from "./review-runner.js";
 import { runReviewProcess, serializeReviewInput, validateRunnerConfiguration, withReviewWorkspace } from "./review-runner-process.js";
 
 const DISABLED_CODE_MODE_NOTICES = new Set([
@@ -77,7 +77,7 @@ export class CodexReviewRunner {
       const args = ["exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check",
         "--sandbox", "read-only", "--json", "--output-schema", schemaFile,
         "-c", `developer_instructions=${JSON.stringify(REVIEW_SYSTEM_PROMPT + (input.reviewPartition?.phase === "synthesis" ? SYNTHESIS_REVIEW_PROMPT : "")
-          + (repairLocations ? REVIEW_LOCATION_RETRY_PROMPT : ""))}`,
+          + (repairLocations ? REVIEW_LOCATION_RETRY_PROMPT : "") + (input.codeEvidence ? REVIEW_EVIDENCE_PROMPT : ""))}`,
         "-c", 'approval_policy="never"', "-c", "project_doc_max_bytes=0", "-c", 'web_search="disabled"',
         "-c", "suppress_unstable_features_warning=true",
         "-c", "skills.include_instructions=false", "-c", "skills.bundled.enabled=false",

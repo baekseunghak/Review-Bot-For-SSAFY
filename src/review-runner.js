@@ -59,14 +59,34 @@ const PARTITION_RESULT_SCHEMA = { ...REVIEW_RESULT_SCHEMA, required: [...REVIEW_
   properties: { ...REVIEW_RESULT_SCHEMA.properties, reviewAudit: partitionAuditSchema } };
 
 export function reviewResultSchema(input) {
-  if (!input?.reviewPartition) return REVIEW_RESULT_SCHEMA;
-  if (!["files", "integration", "synthesis"].includes(input.reviewPartition.phase)) {
+  if (input?.reviewPartition && !["files", "integration", "synthesis"].includes(input.reviewPartition.phase)) {
     throw Object.assign(new UserError("Invalid partitioned review phase."), { code: "review_partition_invalid" });
   }
-  return PARTITION_RESULT_SCHEMA;
+  const schema = input?.reviewPartition ? PARTITION_RESULT_SCHEMA : REVIEW_RESULT_SCHEMA;
+  if (!input?.codeEvidence) return schema;
+  const review = structuredClone(schema);
+  const audit = review.properties.reviewAudit?.properties;
+  const evidenceId = { type: "string", pattern: "^E[0-9a-f]{20}$" };
+  if (audit) {
+    const finding = audit.findings.items;
+    delete finding.properties.path;
+    delete finding.properties.line;
+    finding.properties.evidenceId = evidenceId;
+    finding.required = finding.required.filter((key) => key !== "path" && key !== "line").concat("evidenceId");
+    audit.resolutions.items.properties.evidence.items = evidenceId;
+  }
+  return { type: "object", additionalProperties: false, required: ["review", "contextRequests"], properties: {
+    review: { anyOf: [review, { type: "null" }] },
+    contextRequests: { type: "array", maxItems: 4, items: { type: "object", additionalProperties: false,
+      required: ["path", "side", "startLine", "endLine"], properties: {
+        path: { type: "string", minLength: 1, maxLength: 1024 }, side: { type: "string", enum: ["base", "head"] },
+        startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 },
+      } } },
+  } };
 }
 
 export function normalizeRunnerEnvelope(value, input) {
+  if (input?.codeEvidence) return value; // The evidence session resolves and validates the model response.
   const options = { context: input?.context, changes: input?.changes, verification: input?.verification };
   if (input?.reviewPartition?.phase === "synthesis") options.changes = { ...input.changes, files: undefined };
   if (!input?.reviewPartition) return normalizeReviewResult(value, options);
@@ -136,6 +156,13 @@ phase=synthesis는 실행기가 원문 파일별 검토와 모든 연동 그룹 
 
 export const REVIEW_LOCATION_RETRY_PROMPT = `
 이 검토 단계의 직전 응답은 보류 지적의 파일·줄 검증에서 반려됐습니다. 제공된 changes.files의 정확한 oldPath/baseContent 또는 newPath/headContent를 다시 대조하세요. 확인된 보류 항목의 첫 줄에는 백틱으로 감싼 실제 경로:줄번호를 사용하세요. 범위 밖 파일, 줄 범위, 추정 줄 번호를 인용하지 마세요. API 경로나 설정값은 보류 항목의 첫 줄에서 파일 인용처럼 쓰지 말고 설명 줄에서 구분하세요. 원문으로 확인할 수 없는 지적은 [확인 필요]로 구분하고, 근거 없이 판정을 유지하거나 승인으로 바꾸지 마세요. 기존 출력 형식과 검토 범위를 지키세요.
+`;
+
+export const REVIEW_EVIDENCE_PROMPT = `
+근거 ID 모드에서는 앞의 원문 전달 및 직접 파일:줄 인용 지시 대신 다음 형식을 따릅니다. changes.files는 변경 파일 목록이고, codeEvidence에는 diff 구간과 주변 코드가 원래 줄 번호, base/head 및 커밋과 함께 있습니다. 실제로 제공된 범위만 검토했다고 밝힙니다. synthesis에는 이미 검증된 근거의 위치와 앞선 단계 결과만 있습니다.
+결과를 낼 때 review에 verdict, body, memory와 필요한 reviewAudit를 넣고 contextRequests는 []로 둡니다. 코드 인용은 body의 해당 줄에 [[근거ID]] 형식으로만 쓰세요. 모델이 파일:줄을 직접 쓰거나 링크·URL을 만들지 않습니다. 확인한 지적의 줄에는 심각도와 분류, 기존의 [지적ID] 및 선택한 [[근거ID]]를 넣습니다. findings에는 path/line 대신 evidenceId 하나를 지정하고 resolutions.evidence에는 ID 배열을 사용합니다. memory의 kind=code인 ref에도 근거 ID만 넣습니다. 제공받은 ID만 선택하고 기존 지적을 유지할 때에는 기존 evidenceId를 보존합니다. 파일별 완료·인터페이스 목록의 경로는 그대로 적습니다.
+invalidCodeEvidence가 true면 직전 응답의 인용 검증에 실패한 것입니다. 현재 입력에서 확인할 수 있는 근거 ID와 표기를 다시 대조해 해당 응답만 교정하세요.
+판단에 주변 원문이나 호출부가 더 필요하면 review는 null로 두고 contextRequests에 저장소 상대 path, side(base 또는 head), 원래 startLine/endLine을 넣습니다. 한 번에 최대 4구간, 구간당 32줄까지 요청할 수 있습니다. 코드 링크는 근거 구간의 첫 줄로 이동하므로 정확한 줄이 필요하면 한 줄만 요청하세요. unavailableCodeContext는 확인할 수 없었던 범위입니다. 남은 요청 횟수가 0이거나 synthesis이면 추가 요청 없이 제공된 근거 범위에서 결론을 내리고, 부족한 근거는 미확인으로 구분합니다. 결과 형식과 나머지 검토 기준은 그대로 지킵니다.
 `;
 
 function holdLocationProblem(body, files) {
@@ -260,7 +287,7 @@ export class ClaudeReviewRunner {
         "--no-session-persistence", "--no-chrome", "--permission-prompts", "none",
         "--output-format", "json", "--json-schema", JSON.stringify(schema),
         "--system-prompt", REVIEW_SYSTEM_PROMPT + (input.reviewPartition?.phase === "synthesis" ? SYNTHESIS_REVIEW_PROMPT : "")
-          + (repairLocations ? REVIEW_LOCATION_RETRY_PROMPT : "")];
+          + (repairLocations ? REVIEW_LOCATION_RETRY_PROMPT : "") + (input.codeEvidence ? REVIEW_EVIDENCE_PROMPT : "")];
       if (this.model) args.push("--model", this.model);
       const output = await runReviewProcess({ command: this.command, args, directory, env: this.env,
         input: serialized, spawnImpl: this.spawn, timeoutMs: this.timeoutMs, maxOutputBytes: this.maxOutputBytes, signal });

@@ -31,7 +31,7 @@ async function installWorkerFixture() {
     : "screening/tests/fixtures/disclosure/synthetic-report.pdf";
   const pdfBytes = Buffer.from("%PDF-1.4\n%\x00\xff\n%%EOF\n", "latin1");
   const mrUrl = "https://gitlab.example.test/team/repo/-/merge_requests/7";
-  const effects = { modelCalls: 0, commentPosts: 0, mmPosts: 0, rawDiffReads: 0, unexpected: [], notes: [] };
+  const effects = { modelCalls: 0, commentPosts: 0, mmPosts: 0, rawDiffReads: 0, extraReads: 0, unexpected: [], notes: [] };
   const save = () => writeFileSync(effectsPath, JSON.stringify(effects));
   const unexpected = (what) => { effects.unexpected.push(what); save(); throw new Error("Unexpected fixture operation"); };
   save();
@@ -70,6 +70,10 @@ async function installWorkerFixture() {
       if (![sha, baseSha].includes(ref)) return unexpected("File ref");
       const source = ref === sha ? "if (!input) throw new Error('empty');\nprocess(input);\n" : "process(input);\n";
       return { encoding: "base64", file_path: "src/input.js", content: Buffer.from(source).toString("base64") };
+    }
+    if (endpoint === `projects/10/repository/files/src%2Fhelper.js?ref=${sha}` && method === "GET") {
+      effects.extraReads++; save();
+      return { encoding: "base64", file_path: "src/helper.js", content: Buffer.from("export const process = (value) => value;\n").toString("base64") };
     }
     if (endpoint === `projects/10/repository/files/docs%2Fscreen.png?ref=${sha}` && method === "GET") {
       return { encoding: "base64", file_path: "docs/screen.png",
@@ -116,7 +120,9 @@ async function installWorkerFixture() {
     child.stdin.on("finish", () => {
       try {
         const data = JSON.parse(input);
-        if (data.context?.status !== "fresh" || data.changes?.headSha !== sha || !data.changes?.files?.[0]?.headContent?.includes("throw new Error")) return unexpected("Incomplete model evidence");
+        const head = data.codeEvidence?.find((e) => e.path === "src/input.js" && e.side === "head");
+        if (data.context?.status !== "fresh" || data.changes?.headSha !== sha || data.changes.files[0].headContent !== undefined
+          || head?.sha !== sha || !head.lines[0].startsWith("1 | if (!input) throw new Error")) return unexpected("Incomplete model evidence");
         if (data.changes.files.length !== 1 || data.changes.excludedImages?.length !== 1
           || data.changes.excludedImages[0].newPath !== "docs/screen.png"
           || /iVBORw0KGgo/.test(input)) return unexpected("Image scope metadata");
@@ -128,9 +134,12 @@ async function installWorkerFixture() {
         effects.modelCalls++;
         effects.modelEvidence = { headSha: data.context.headSha, perspectives: data.context.perspectives.length, jiraKeys: data.context.relatedIssues.map((entry) => entry.key) };
         save();
-        const result = { verdict: "approve", body: "## 리뷰 결과: 승인\n\n### 확인한 범위\n제공된 현재 코드만 정적으로 확인했고 테스트는 실행하지 않았습니다.\n\n### 작업 맥락\nTEST-1의 빈 입력 거부 조건을 `src/input.js:1`과 대조했습니다.",
-          memory: { implementation: [{ summary: "빈 입력을 명시 오류로 거부한다.", basis: "observed", evidence: [{ kind: "code", ref: "src/input.js:1" }] }],
-            decisions: [], validations: [{ check: "단위 테스트 실행", result: "not_run", basis: "unknown", evidence: [] }], remainingWork: [] } };
+        const helper = data.codeEvidence.find((e) => e.path === "src/helper.js");
+        const result = helper ? { contextRequests: [], review: { verdict: "approve",
+          body: `## 리뷰 결과: 승인\n\n### 확인한 범위\n제공된 코드를 확인했고 테스트는 실행하지 않았습니다.\n\n### 작업 맥락\nTEST-1의 입력 거부 조건과 [[${head.id}]], [[${helper.id}]]를 대조했습니다.`,
+          memory: { implementation: [{ summary: "빈 입력을 명시 오류로 거부한다.", basis: "observed", evidence: [{ kind: "code", ref: head.id }] }],
+            decisions: [], validations: [{ check: "단위 테스트 실행", result: "not_run", basis: "unknown", evidence: [] }], remainingWork: [] } } }
+          : { review: null, contextRequests: [{ path: "src/helper.js", side: "head", startLine: 1, endLine: 1 }] };
         if (provider === "codex") {
           const events = [
             { type: "thread.started", thread_id: "fixture-thread" },
@@ -267,13 +276,16 @@ for (const provider of ["claude", "codex"]) test(`authenticated webhook drives t
     assert.equal(status.data.startupSync.ready, true);
     assert.equal(status.data.startupSync.status, "done");
     const effects = JSON.parse(readFileSync(effectsPath, "utf8"));
-    assert.deepEqual([effects.modelCalls, effects.commentPosts, effects.mmPosts], [1, 1, 1]);
+    assert.deepEqual([effects.modelCalls, effects.commentPosts, effects.mmPosts, effects.extraReads], [2, 1, 1, 1]);
     assert.equal(effects.rawDiffReads, 1);
     assert.deepEqual(effects.unexpected, []);
     assert.deepEqual(effects.modelEvidence, { headSha: SHA, perspectives: 1, jiraKeys: ["TEST-1"] });
     assert.equal(effects.notification.channel, "@fixture.mm");
     assert.match(effects.notification.text, /#note_77/);
     assert.match(effects.notes[0].body, /<!-- reviewbot:[a-f0-9]{64} -->/);
+    assert.ok(effects.notes[0].body.includes(`/-/blob/${SHA}/src/input.js#L1`));
+    assert.ok(effects.notes[0].body.includes(`/-/blob/${SHA}/src/helper.js#L1`));
+    assert.doesNotMatch(effects.notes[0].body, /\[\[E[0-9a-f]{20}\]\]/);
     assert.match(effects.notes[0].body, /이미지 1개는 시각적으로 확인하지 않았으며/);
     assert.equal(effects.notes[0].body.match(/이미지 1개는 시각적으로 확인하지 않았으며/g).length, 1);
     const expectedPdfPath = provider === "codex"
