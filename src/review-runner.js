@@ -134,7 +134,11 @@ export const SYNTHESIS_REVIEW_PROMPT = `
 phase=synthesis는 실행기가 원문 파일별 검토와 모든 연동 그룹 쌍의 원문 대조를 완료한 뒤 수행하는 최종 종합입니다. 이 단계에는 원문 코드가 없으며 partitionReports와 integrationReports의 구조화된 검토·반증 결과를 종합합니다. reviewPartition.requiredPaths 전체를 coveredFiles에 기록하고 interfaces는 빈 배열로 둡니다. priorFindings의 모든 식별자를 resolutions에서 정확히 한 번씩 처리합니다. 새 확정 결함이나 새로운 코드 위치를 만들지 않습니다. 유지하는 지적은 기존 식별자·코드 위치와 앞선 검토에서 확인된 등급·차단 여부를 그대로 사용합니다. 기각하려면 integrationReports에서 같은 식별자를 dismissed로 반증한 결과가 있어야 하며 그 결과의 evidence 중에서 근거를 선택합니다. 원문을 이 단계에서 새로 읽었다고 쓰지 말고 앞선 원문 대조와 이번 종합의 범위를 구분합니다. 새로운 의문은 미확인 사항이나 remainingWork로 남깁니다. 기존 body·memory 형식과 한국어 등급, 검증 결과의 출처 규칙도 유지합니다.
 `;
 
-function validHoldLocations(body, files) {
+export const REVIEW_LOCATION_RETRY_PROMPT = `
+이 검토 단계의 직전 응답은 보류 지적의 파일·줄 검증에서 반려됐습니다. 제공된 changes.files의 정확한 oldPath/baseContent 또는 newPath/headContent를 다시 대조하세요. 확인된 보류 항목의 첫 줄에는 백틱으로 감싼 실제 경로:줄번호를 사용하세요. 범위 밖 파일, 줄 범위, 추정 줄 번호를 인용하지 마세요. API 경로나 설정값은 보류 항목의 첫 줄에서 파일 인용처럼 쓰지 말고 설명 줄에서 구분하세요. 원문으로 확인할 수 없는 지적은 [확인 필요]로 구분하고, 근거 없이 판정을 유지하거나 승인으로 바꾸지 마세요. 기존 출력 형식과 검토 범위를 지키세요.
+`;
+
+function holdLocationProblem(body, files) {
   const lineCounts = new Map();
   for (const file of files) {
     for (const [path, content] of [[file.oldPath, file.baseContent], [file.newPath, file.headContent]]) {
@@ -145,21 +149,28 @@ function validHoldLocations(body, files) {
   }
   const section = body.split(/^### 수정이 필요한 부분\s*$/m)[1]?.split(/^#{2,3} /m)[0] ?? "";
   const reasons = section.split(/\r?\n/).filter((line) => !line.includes("[확인 필요]") && usedHoldCategories(line).length);
-  return reasons.length > 0 && reasons.every((line) => {
+  if (!reasons.length) return "missing_citation";
+  for (const line of reasons) {
     // Dotted expressions such as evidence.length are not source-file citations.
     const locations = citedLocations(line).filter((location) => /:\d+$/.test(location)
       || location.includes("/") || location.includes("\\") || lineCounts.has(location));
-    return locations.length > 0 && locations.every((location) => {
+    if (!locations.length) return "missing_citation";
+    for (const location of locations) {
       const match = /^(.*):(\d+)$/.exec(location);
-      if (!match) return lineCounts.has(location);
-      const number = Number(match[2]);
-      return Number.isSafeInteger(number) && number > 0 && number <= (lineCounts.get(match[1]) ?? 0);
-    });
-  });
+      const path = match?.[1] ?? location;
+      if (!lineCounts.has(path)) return "outside_input";
+      if (match) {
+        const number = Number(match[2]);
+        if (!Number.isSafeInteger(number) || number < 1 || number > lineCounts.get(path)) return "line_out_of_range";
+      }
+    }
+  }
+  return null;
 }
 
 export function normalizeReviewResult(value, { context, changes, verification } = {}) {
   let code = "review_result_invalid";
+  let locationProblem;
   try {
     if (!value || typeof value !== "object" || Array.isArray(value)
       || Object.keys(value).some((key) => !["verdict", "body", "memory"].includes(key))
@@ -196,8 +207,11 @@ export function normalizeReviewResult(value, { context, changes, verification } 
     if (context && reviewContextProblems({ contextRequired: true, context, headSha: context.headSha,
       contextVersion: context.contextVersion }, body).length) throw new Error();
     code = "review_locations_invalid";
-    if (value.verdict === "hold" && changes?.files !== undefined
-      && (!Array.isArray(changes.files) || !validHoldLocations(body, changes.files))) throw new Error();
+    if (value.verdict === "hold" && changes?.files !== undefined) {
+      if (!Array.isArray(changes.files)) throw new Error();
+      locationProblem = holdLocationProblem(body, changes.files);
+      if (locationProblem) throw new Error();
+    }
     code = "review_test_claim_invalid";
     const verifiedEntries = verification && (!context || verification.headSha === context.headSha)
       && (!changes?.headSha || verification.headSha === changes.headSha) ? verificationMemory(verification) : [];
@@ -212,7 +226,8 @@ export function normalizeReviewResult(value, { context, changes, verification } 
       && excludedPaths.some((path) => source.ref === path || source.ref.startsWith(`${path}:`) || source.ref.startsWith(`${path} @ `)))))) throw new Error();
     return { verdict: value.verdict, body, memory };
   } catch {
-    throw Object.assign(new UserError("The review runner returned an invalid review. No review was published."), { code });
+    throw Object.assign(new UserError("The review runner returned an invalid review. No review was published."),
+      { code, ...(locationProblem ? { locationProblem } : {}) });
   }
 }
 
@@ -234,7 +249,7 @@ export class ClaudeReviewRunner {
     this.env = runnerEnvironment(env);
   }
 
-  async review(input, { signal } = {}) {
+  async review(input, { signal, repairLocations = false } = {}) {
     const schema = reviewResultSchema(input);
     const serialized = serializeReviewInput(input, this.maxInputBytes, signal);
     return withReviewWorkspace(async (directory) => {
@@ -244,7 +259,8 @@ export class ClaudeReviewRunner {
         "--setting-sources", "", "--settings", '{"disableAllHooks":true}',
         "--no-session-persistence", "--no-chrome", "--permission-prompts", "none",
         "--output-format", "json", "--json-schema", JSON.stringify(schema),
-        "--system-prompt", REVIEW_SYSTEM_PROMPT + (input.reviewPartition?.phase === "synthesis" ? SYNTHESIS_REVIEW_PROMPT : "")];
+        "--system-prompt", REVIEW_SYSTEM_PROMPT + (input.reviewPartition?.phase === "synthesis" ? SYNTHESIS_REVIEW_PROMPT : "")
+          + (repairLocations ? REVIEW_LOCATION_RETRY_PROMPT : "")];
       if (this.model) args.push("--model", this.model);
       const output = await runReviewProcess({ command: this.command, args, directory, env: this.env,
         input: serialized, spawnImpl: this.spawn, timeoutMs: this.timeoutMs, maxOutputBytes: this.maxOutputBytes, signal });

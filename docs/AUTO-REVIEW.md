@@ -214,6 +214,7 @@ node --env-file=.env bin/review-request-run.mjs 97
 | `notifying` | DM 전송 직전 checkpoint. 중단 시 전달 여부를 추정하지 않음 |
 | `notification_unknown` | 전달 여부 불명. 자동 재전송 없이 최종 실패로 남김 |
 | `completed` | 파이프라인 종료. 실제 댓글·알림 여부는 보존한 단계와 처리 결과로 구분 |
+| `manual_completed` | 같은 SHA의 게시된 수동 검토를 완료 기록에 연결. `manualNoteId`로 기존 댓글 확인 |
 
 lease가 만료되면 다른 worker가 저장한 stage와 artifact를 가져올 수 있습니다. 이전 소유자는 lease를 잃으면 checkpoint나 외부 쓰기를 계속할 수 없습니다. 게시 전에는 대기열의 최신 상태와 GitLab의 현재 상태를 둘 다 확인합니다. 일반 실패는 기본 최대 5회까지 1분부터 늘어나는 백오프로 재시도하며, 불완전한 자료·지원하지 않는 파일·게시 충돌·불명 알림은 자동 재시도를 멈춥니다.
 
@@ -250,6 +251,8 @@ MCP `review_worker_status`:
 | `review_step_failed` | 상세 구분이 없는 처리 오류. 이 코드만으로 과거의 실제 원인을 추정하지 않음 |
 
 실패를 보고할 때 요청·MR·단계와 함께 확인된 오류 설명, 재시도 상태, 댓글·알림 전송 여부를 구분합니다. 오래된 공통 오류 코드에 새 분류를 소급 적용해 원인을 확인한 것으로 쓰지 않습니다.
+
+원문 검토 응답의 파일·줄 검증이 실패하면 같은 입력에 교정 지시를 추가해 해당 검토만 한 번 다시 요청합니다. 이미 검증한 묶음의 영수증은 유지합니다. 교정 응답도 위치 검증에 실패하면 `reviewLocationProblem`에 `missing_citation`, `outside_input` 또는 `line_out_of_range`를 기록하고 기존 실패 절차를 따릅니다. 실패 응답 원문은 저장하지 않습니다.
 
 댓글 확인 전 최종 실패가 발생하면, 현재 MR의 작성자에게 Mattermost DM으로 요청 번호·SHA·실패 단계·오류 설명·MR 링크를 보냅니다. 작성자 매핑이 없으면 등록한 `is_self` 참가자에게 보냅니다. 기존 활성 알림 채널과 기본 `review-failed` 템플릿을 사용합니다. 자동 재시도 중에는 알림을 대기시키지 않습니다.
 

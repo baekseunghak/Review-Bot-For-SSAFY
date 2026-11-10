@@ -103,7 +103,7 @@ export class ReviewWorker {
           if (bundle?.contextVersion !== artifact.contextRef.contextVersion) bundle = null;
         }
         if (!bundle) {
-          checkpoint("reviewing", { review: null, completion: null, comment: null, contextSizeError: null });
+          checkpoint("reviewing", { review: null, completion: null, comment: null, contextSizeError: null, reviewLocationProblem: null });
           const changes = await this.gitlab.readReview(job);
           current();
           this.contextService.captureReviewComments?.(changes);
@@ -166,6 +166,9 @@ export class ReviewWorker {
           limitBytes: error.limitBytes ?? null, contextBytes: error.contextBytes ?? null,
           section: error.section ?? null, filePath: error.filePath ?? null,
         } }, true);
+        if (code === "review_locations_invalid" && ["missing_citation", "outside_input", "line_out_of_range"].includes(error.locationProblem)) {
+          checkpoint(stage, { reviewLocationProblem: error.locationProblem }, true);
+        }
         if (OBSOLETE.has(code)) {
           checkpoint("skipped", { outcome: code }, true);
           this.inbox.finish(id, leaseToken, { now: this.now() });

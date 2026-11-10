@@ -463,6 +463,25 @@ export class ReviewInbox {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
+  recordManualCompletion({ requestId, projectId, mrIid, headSha, noteId, now = new Date() }) {
+    id(requestId);
+    id(mrIid);
+    id(noteId);
+    if (!this.projectIds.has(id(projectId)) || !sha(headSha)) throw new UserError("Invalid manual review identity.");
+    const result = this.db.prepare(`UPDATE review_executions SET status = 'completed', stage = 'manual_completed',
+      artifact = json_set(artifact, '$.manualNoteId', ?), lease_token = NULL, lease_expires_at = NULL,
+      next_attempt_at = NULL, error_code = NULL, updated_at = ?
+      WHERE request_id = ? AND status IN ('running', 'retry', 'failed')
+        AND stage IN ('queued', 'reviewing', 'validating', 'reviewed')
+        AND EXISTS (SELECT 1 FROM review_requests r JOIN review_merge_requests m
+          ON m.project_id = r.project_id AND m.mr_iid = r.mr_iid
+          WHERE r.id = ? AND r.project_id = ? AND r.mr_iid = ? AND r.head_sha = ?
+            AND r.status = 'pending' AND m.state = 'opened' AND m.draft = 0 AND m.head_sha = r.head_sha)`)
+      .run(noteId, workerTime(now), requestId, requestId, projectId, mrIid, sha(headSha));
+    if (!result.changes) throw new UserError("Only a current request before publication can be completed by an existing manual review.");
+    return { status: "completed", stage: "manual_completed", requestId, noteId };
+  }
+
   retry(requestId, token, { errorCode, delayMs = 60_000, maxAttempts = 5, now = new Date() } = {}) {
     const at = workerTime(now);
     workerWord(errorCode);
@@ -579,7 +598,7 @@ export class ReviewInbox {
         n.status AS failureNotification
       FROM review_executions e LEFT JOIN review_failure_notifications n USING(request_id)
       ORDER BY e.updated_at DESC, e.request_id DESC LIMIT ?`).all(limit).map((row) => {
-      const { partitionedReview, contextSizeError } = JSON.parse(row.artifact);
+      const { partitionedReview, contextSizeError, manualNoteId, reviewLocationProblem } = JSON.parse(row.artifact);
       const { failureNotification } = row;
       return {
         requestId: Number(row.request_id), stage: row.stage, status: row.status,
@@ -588,6 +607,8 @@ export class ReviewInbox {
         nextAttemptAt: row.next_attempt_at,
         ...(partitionedReview ? { partitionedReview } : {}),
         ...(contextSizeError ? { contextSizeError } : {}),
+        ...(manualNoteId ? { manualNoteId } : {}),
+        ...(reviewLocationProblem ? { reviewLocationProblem } : {}),
         ...(failureNotification && (failureNotification !== "pending" || row.status === "failed") ? { failureNotification } : {}),
       };
     });

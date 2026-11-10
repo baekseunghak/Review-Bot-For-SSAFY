@@ -64,6 +64,39 @@ async function setup(t, behavior = (payload) => reviewResult(payload), options =
   return { review, runner, calls, dataDir };
 }
 
+test("범위를 벗어난 줄은 같은 묶음만 교정하고 검증된 묶음의 결과는 재사용한다", async (t) => {
+  const input = inputFixture();
+  const attempts = [];
+  const { review, calls } = await setup(t, (payload, { repairLocations }) => {
+    const { phase, batchIndex, priorFindings } = payload.reviewPartition;
+    if (phase === "files" && batchIndex === 2) {
+      attempts.push(Boolean(repairLocations));
+      return reviewResult(payload, { findings: [{ ...findingFor(payload), line: repairLocations ? 1 : 999 }] });
+    }
+    return reviewResult(payload, { findings: priorFindings,
+      resolutions: priorFindings.map((finding) => resolutionFor(finding, "retained")) });
+  });
+  const result = await review.review(input);
+  assert.equal(result.verdict, "hold");
+  assert.deepEqual(attempts, [false, true]);
+  assert.deepEqual(calls[1], calls[2]);
+  assert.equal(calls.filter((value) => value.reviewPartition.phase === "files" && value.reviewPartition.batchIndex === 1).length, 1);
+  const before = calls.length;
+  assert.deepEqual(await review.review(input), result);
+  assert.equal(calls.length, before);
+});
+
+test("두 번 모두 자료에 없는 파일을 인용하면 해당 묶음 이후의 검토와 게시를 중단한다", async (t) => {
+  const attempts = [];
+  const { review, calls } = await setup(t, (payload, { repairLocations }) => {
+    attempts.push(Boolean(repairLocations));
+    return reviewResult(payload, { findings: [{ ...findingFor(payload), path: "src/not-provided.js" }] });
+  });
+  await assert.rejects(review.review(inputFixture()), { code: "review_locations_invalid", locationProblem: "outside_input" });
+  assert.deepEqual(attempts, [false, true]);
+  assert.deepEqual(calls[0], calls[1]);
+});
+
 test("분할 검토는 이름 변경·삭제를 포함한 모든 파일을 완전하게 전달하고 전체 현재 소스로 통합한다", async (t) => {
   const input = inputFixture();
   const { review, calls } = await setup(t);

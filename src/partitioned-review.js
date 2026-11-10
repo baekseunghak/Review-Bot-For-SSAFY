@@ -121,12 +121,20 @@ export class PartitionedReviewRunner {
   }
 
   async review(input, { signal, assertCurrent = () => {}, onProgress = () => {} } = {}) {
+    const run = async (payload) => {
+      try { return await this.runner.review(payload, { signal }); }
+      catch (error) {
+        if (error?.code !== "review_locations_invalid" || signal?.aborted) throw error;
+        assertCurrent();
+        return this.runner.review(payload, { signal, repairLocations: true });
+      }
+    };
     const fits = (payload, byteLimit = this.maxInputBytes) => {
       const serialized = JSON.stringify(payload);
       return Buffer.byteLength(serialized) <= byteLimit && serialized.length <= this.maxInputCharacters;
     };
     if (bytes(input) <= Math.min(this.thresholdBytes, this.maxInputBytes) && (input.changes.contextBytes ?? 0) <= this.thresholdBytes) {
-      return this.runner.review(input, { signal });
+      return run(input);
     }
     const files = input.changes.files;
     if (!Array.isArray(files) || !files.length || files.length > 512 || new Set(files.map(filePath)).size !== files.length) fail("review_partition_invalid");
@@ -175,7 +183,7 @@ export class PartitionedReviewRunner {
       assertCurrent(); await writeFile(planPath, JSON.stringify(plan), { flag: "wx", mode: 0o600 });
     }
     const reports = [], findings = [];
-    const receipt = async (name, payload, evaluate, validate) => {
+    const receipt = async (name, payload, validate) => {
       const path = join(directory, `${name}.json`), payloadHash = reviewDigest(payload);
       assertCurrent();
       try {
@@ -186,7 +194,7 @@ export class PartitionedReviewRunner {
         const restored = normalizeRunnerEnvelope(saved.result, payload);
         validate(restored); return restored;
       } catch (error) { if (error.code !== "ENOENT") throw error; }
-      const result = await evaluate(); validate(result); assertCurrent();
+      const result = await run(payload); validate(result); assertCurrent();
       const encoded = JSON.stringify({ planId, payloadHash, resultHash: hash(result), result });
       if (Buffer.byteLength(encoded) > 1_000_000) fail("review_receipt_invalid");
       await writeFile(path, encoded, { flag: "wx", mode: 0o600 });
@@ -195,7 +203,7 @@ export class PartitionedReviewRunner {
     await checkpoint({ phase: "files", totalBatches: batches.length, completedBatches: 0 });
     for (let index = 0; index < batches.length; index++) {
       const payload = makeInput(batches[index], "files", index + 1, batches.length);
-      const result = await receipt(`batch-${index + 1}`, payload, () => this.runner.review(payload, { signal }),
+      const result = await receipt(`batch-${index + 1}`, payload,
         (value) => validateAudit(value, batches[index], "files"));
       const prefix = `b${String(index + 1).padStart(3, "0")}`;
       const qualified = result.reviewAudit.findings.map((finding) => ({ ...finding, id: `${prefix}:${finding.id}` }));
@@ -222,7 +230,7 @@ export class PartitionedReviewRunner {
     let integrationDetails = {};
     if (fits(payload)) {
       await checkpoint({ phase: "integration", totalBatches: batches.length, completedBatches: batches.length });
-      integrated = await receipt("integration", payload, () => this.runner.review(payload, { signal }),
+      integrated = await receipt("integration", payload,
         (value) => validateAudit(value, integrationFiles, "integration", findings));
     } else {
       const pairPayload = (selected, candidates, index) => {
@@ -254,16 +262,15 @@ export class PartitionedReviewRunner {
         const pairInput = pairPayload(selected, prior, index + 1);
         await checkpoint({ phase: "integration", totalBatches: batches.length, completedBatches: batches.length,
           integrationGroups: groups.length, totalIntegrationPairs: pairs.length, completedIntegrationPairs: index });
-        const result = await receipt(`links-v1-${pairs[index][0]}-${pairs[index][1]}`, pairInput,
-          () => this.runner.review(pairInput, { signal }), (value) => {
-            validateAudit(value, selected, "integration", prior);
-            for (const finding of value.reviewAudit.findings) {
-              const original = prior.find((item) => item.id === finding.id);
-              if (original ? original.path !== finding.path || original.line !== finding.line : finding.id.includes(":")) {
-                fail("review_audit_invalid");
-              }
+        const result = await receipt(`links-v1-${pairs[index][0]}-${pairs[index][1]}`, pairInput, (value) => {
+          validateAudit(value, selected, "integration", prior);
+          for (const finding of value.reviewAudit.findings) {
+            const original = prior.find((item) => item.id === finding.id);
+            if (original ? original.path !== finding.path || original.line !== finding.line : finding.id.includes(":")) {
+              fail("review_audit_invalid");
             }
-          });
+          }
+        });
         const known = new Set(prior.map((finding) => finding.id));
         const qualified = result.reviewAudit.findings.map((finding) => {
           if (known.has(finding.id)) return finding;
@@ -283,7 +290,7 @@ export class PartitionedReviewRunner {
       if (candidates.length > 512 || !fits(payload)) fail("review_integration_too_large");
       await checkpoint({ phase: "synthesis", totalBatches: batches.length, completedBatches: batches.length,
         integrationGroups: groups.length, totalIntegrationPairs: pairs.length, completedIntegrationPairs: pairs.length });
-      integrated = await receipt("synthesis-v1", payload, () => this.runner.review(payload, { signal }), (value) => {
+      integrated = await receipt("synthesis-v1", payload, (value) => {
         validateAudit(value, integrationFiles, "integration", candidates);
         for (const finding of value.reviewAudit.findings) {
           const prior = candidates.find((candidate) => candidate.id === finding.id);

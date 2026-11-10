@@ -58,6 +58,27 @@ test("a request has one durable worker owner and completion prevents same-SHA re
   assert.equal(other.claimNext({ now: LATER }).headSha, NEXT_SHA);
 });
 
+test("an existing manual review ends only the matching pre-publication job and revokes its lease", (t) => {
+  const { instance, open } = fixture(t);
+  send(instance);
+  const job = instance.claimNext({ now: NOW });
+  const other = open();
+  const manual = { requestId: job.id, projectId: 10, mrIid: 7, headSha: SHA, noteId: 31, now: LATER };
+  assert.throws(() => other.recordManualCompletion({ ...manual, headSha: NEXT_SHA }), UserError);
+  instance.checkpoint(job.id, job.leaseToken, { stage: "reviewing", now: NOW });
+  assert.equal(other.recordManualCompletion(manual).stage, "manual_completed");
+  assert.equal(other.workerStatus().jobs[0].manualNoteId, 31);
+  assert.equal(instance.isCurrent(job.id, job.leaseToken, { now: LATER }), false);
+  assert.throws(() => instance.checkpoint(job.id, job.leaseToken, { stage: "posting", now: LATER }), UserError);
+  send(instance, { updated_at: LATER }, "same-sha-after-manual");
+  assert.equal(other.claimNext({ now: LATER }), null);
+  const nextTime = "2026-10-20T09:00:02.000Z";
+  send(instance, { updated_at: nextTime, last_commit: { id: NEXT_SHA } });
+  const next = instance.claimNext({ now: nextTime });
+  instance.checkpoint(next.id, next.leaseToken, { stage: "posting", now: nextTime });
+  assert.throws(() => other.recordManualCompletion({ ...manual, requestId: next.id, headSha: NEXT_SHA, now: nextTime }), UserError);
+});
+
 test("expired leases recover prior artifacts while old owners lose mutation rights", (t) => {
   const { instance, open } = fixture(t);
   send(instance);
