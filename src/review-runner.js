@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { UserError } from "./core.js";
 import { normalizeReviewMemory } from "./review-memory.js";
+import { MAX_CONTEXT_REQUESTS } from "./review-evidence.js";
 import { verificationMemory } from "./review-verification.js";
 import { runReviewProcess, serializeReviewInput, validateRunnerConfiguration, withReviewWorkspace } from "./review-runner-process.js";
 import { citedLocations, missingSections, reviewContextProblems, usedHoldCategories, verdictProblems } from "../bin/mr-review.mjs";
@@ -77,7 +78,8 @@ export function reviewResultSchema(input) {
   }
   return { type: "object", additionalProperties: false, required: ["review", "contextRequests"], properties: {
     review: { anyOf: [review, { type: "null" }] },
-    contextRequests: { type: "array", maxItems: 4, items: { type: "object", additionalProperties: false,
+    contextRequests: { type: "array", maxItems: input.contextRequestLimit === MAX_CONTEXT_REQUESTS ? MAX_CONTEXT_REQUESTS : 4,
+      items: { type: "object", additionalProperties: false,
       required: ["path", "side", "startLine", "endLine"], properties: {
         path: { type: "string", minLength: 1, maxLength: 1024 }, side: { type: "string", enum: ["base", "head"] },
         startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 },
@@ -164,6 +166,16 @@ export const REVIEW_EVIDENCE_PROMPT = `
 invalidCodeEvidence가 true면 직전 응답의 인용 검증에 실패한 것입니다. 현재 입력에서 확인할 수 있는 근거 ID와 표기를 다시 대조해 해당 응답만 교정하세요.
 판단에 주변 원문이나 호출부가 더 필요하면 review는 null로 두고 contextRequests에 저장소 상대 path, side(base 또는 head), 원래 startLine/endLine을 넣습니다. 한 번에 최대 4구간, 구간당 32줄까지 요청할 수 있습니다. 코드 링크는 근거 구간의 첫 줄로 이동하므로 정확한 줄이 필요하면 한 줄만 요청하세요. unavailableCodeContext는 확인할 수 없었던 범위입니다. 남은 요청 횟수가 0이거나 synthesis이면 추가 요청 없이 제공된 근거 범위에서 결론을 내리고, 부족한 근거는 미확인으로 구분합니다. 결과 형식과 나머지 검토 기준은 그대로 지킵니다.
 `;
+
+export function reviewEvidencePrompt(input) {
+  if (!input.codeEvidence) return "";
+  if (input.contextRequestLimit !== MAX_CONTEXT_REQUESTS) return REVIEW_EVIDENCE_PROMPT;
+  return `${REVIEW_EVIDENCE_PROMPT}
+contextRequestLimit이 있으면 앞의 요청 개수 대신 그 값을 사용합니다. 처음부터 codeEvidence에 포함된 다른 파일의 발췌도 판단 근거입니다. 파일별 단계에서는 requiredPaths의 변경과 인과관계가 있는 결함만 보고합니다. 보충 파일에서 발견한 독립 결함은 해당 파일이 포함된 묶음의 검토 범위입니다.
+먼저 묶음 전체를 훑고, 판단을 바꿀 수 있는 누락 구간을 한 응답의 contextRequests에 최대 ${MAX_CONTEXT_REQUESTS}개까지 모으세요. 이미 제공되거나 조회 불가로 표시된 범위는 다시 요청하지 말고, 보충 자료를 보고 새로 드러난 의존성이 있을 때 다음 요청을 사용하세요.
+연동과 종합 단계에서는 priorFindings의 각 ID를 resolutions에서 한 번씩 처리하고, 각 reason에는 16자 이상으로 유지 근거나 반증을 작성하세요. 유지한 지적은 원래 ID와 evidenceId를 findings와 본문에 그대로 사용합니다.
+`;
+}
 
 function holdLocationProblem(body, files) {
   const lineCounts = new Map();
@@ -287,7 +299,7 @@ export class ClaudeReviewRunner {
         "--no-session-persistence", "--no-chrome", "--permission-prompts", "none",
         "--output-format", "json", "--json-schema", JSON.stringify(schema),
         "--system-prompt", REVIEW_SYSTEM_PROMPT + (input.reviewPartition?.phase === "synthesis" ? SYNTHESIS_REVIEW_PROMPT : "")
-          + (repairLocations ? REVIEW_LOCATION_RETRY_PROMPT : "") + (input.codeEvidence ? REVIEW_EVIDENCE_PROMPT : "")];
+          + (repairLocations ? REVIEW_LOCATION_RETRY_PROMPT : "") + reviewEvidencePrompt(input)];
       if (this.model) args.push("--model", this.model);
       const output = await runReviewProcess({ command: this.command, args, directory, env: this.env,
         input: serialized, spawnImpl: this.spawn, timeoutMs: this.timeoutMs, maxOutputBytes: this.maxOutputBytes, signal });

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { PartitionedReviewRunner } from "../src/partitioned-review.js";
-import { normalizeRunnerEnvelope } from "../src/review-runner.js";
+import { normalizeRunnerEnvelope, reviewResultSchema } from "../src/review-runner.js";
 import { ReviewEvidence } from "../src/review-evidence.js";
 
 const pathOf = (file) => file.deletedFile ? file.oldPath : file.newPath;
@@ -61,7 +61,7 @@ async function setup(t, behavior = (payload) => reviewResult(payload), options =
   const calls = [];
   const runner = { maxInputBytes: 100_000, command: "fixture-runner", model: "fixture-model",
     async review(payload, runtime) { calls.push(structuredClone(payload)); return behavior(payload, runtime, calls.length); } };
-  const review = new PartitionedReviewRunner({ runner, dataDir, thresholdBytes: 1, batchBytes: 50_000, maxFilesPerBatch: 1, ...options });
+  const review = new PartitionedReviewRunner({ runner, dataDir, thresholdBytes: 1, batchBytes: 50_000, maxFilesPerBatch: 1, concurrency: 1, ...options });
   return { review, runner, calls, dataDir };
 }
 
@@ -162,6 +162,97 @@ test("보충 조회의 경로·커밋 선택과 줄 범위를 제한한다", asy
   assert.deepEqual(added, []);
   assert.deepEqual(unavailable, [request]);
   assert.equal(calls, 1);
+});
+
+test("서로 다른 묶음을 최대 세 개씩 검토하고 완료 순서와 상관없이 원래 순서로 통합한다", { timeout: 3000 }, async (t) => {
+  const firstThreeStarted = Promise.withResolvers(), fourthStarted = Promise.withResolvers();
+  const started = [], finished = [], progress = [];
+  let active = 0, peak = 0;
+  const { review } = await setup(t, async (payload) => {
+    const { phase, batchIndex } = payload.reviewPartition;
+    if (phase === "integration") {
+      assert.deepEqual(payload.partitionReports.map((report) => report.batchId), ["b001", "b002", "b003", "b004"]);
+      return reviewResult(payload);
+    }
+    started.push(batchIndex);
+    peak = Math.max(peak, ++active);
+    if (started.length === 3) firstThreeStarted.resolve();
+    await firstThreeStarted.promise;
+    if (batchIndex === 1) await fourthStarted.promise;
+    if (batchIndex === 4) fourthStarted.resolve();
+    finished.push(batchIndex);
+    active--;
+    return reviewResult(payload);
+  }, { concurrency: 3 });
+  assert.equal((await review.review(inputFixture(), { onProgress: (entry) => progress.push(entry) })).verdict, "approve");
+  assert.deepEqual(started, [1, 2, 3, 4]);
+  assert.equal(peak, 3);
+  assert.equal(finished.at(-1), 1);
+  assert.deepEqual(progress.filter((entry) => entry.phase === "files").map((entry) => entry.completedBatches), [0, 1, 2, 3, 4]);
+});
+
+test("병렬 묶음 실패는 진행 중인 호출을 취소하고 저장한 묶음부터 재개한다", { timeout: 3000 }, async (t) => {
+  const thirdStarted = Promise.withResolvers();
+  let failing = true, cancelled = false;
+  const { review, calls } = await setup(t, async (payload, { signal }) => {
+    if (failing && payload.reviewPartition.phase === "files") {
+      if (payload.reviewPartition.batchIndex === 2) {
+        await thirdStarted.promise;
+        throw Object.assign(new Error("Temporary runner failure"), { code: "runner_timeout" });
+      }
+      if (payload.reviewPartition.batchIndex === 3) {
+        await new Promise((resolve) => {
+          signal.addEventListener("abort", () => { cancelled = true; resolve(); }, { once: true });
+          thirdStarted.resolve();
+        });
+      }
+    }
+    return reviewResult(payload);
+  }, { concurrency: 2 });
+  await assert.rejects(review.review(inputFixture()), { code: "runner_timeout" });
+  assert.equal(cancelled, true);
+  assert.deepEqual(calls.map((call) => call.reviewPartition.batchIndex), [1, 2, 3]);
+  failing = false;
+  assert.equal((await review.review(inputFixture())).verdict, "approve");
+  assert.equal(calls.filter((call) => call.reviewPartition.batchIndex === 1).length, 1);
+});
+
+test("관련 변경 파일을 먼저 제공하고 남은 여섯 구간은 한 번에 보충한다", async () => {
+  const input = evidenceInput();
+  const [selected, related] = input.changes.files;
+  const loads = [];
+  const evidence = new ReviewEvidence(input.changes, { async file(...args) { loads.push(args); return "call target\n"; } });
+  const payload = { ...input, changes: { ...input.changes, files: [selected] }, reviewPartition: { phase: "files" } };
+  const requests = Array.from({ length: 6 }, (_, index) => ({ path: `support/file-${index}.js`, side: "head", startLine: 1, endLine: 1 }));
+  const assertCurrent = () => {};
+  let calls = 0;
+  const { result, saved } = await evidence.evaluate(payload, (value) => {
+    const companion = value.codeEvidence.find((entry) => entry.path === related.newPath && entry.startLine === 1);
+    assert.equal(companion.lines[0], "1 | head-1");
+    assert.equal(reviewResultSchema(value).properties.contextRequests.maxItems, 8);
+    assert.equal(loads.length, calls ? 6 : 0);
+    if (++calls === 1) return { review: null, contextRequests: requests };
+    const external = value.codeEvidence.find((entry) => entry.path === requests.at(-1).path);
+    return { review: { body: `[[${companion.id}]] [[${external.id}]]`, reviewAudit: { findings: [], resolutions: [] } }, contextRequests: [] };
+  }, { assertCurrent, fits: () => true });
+  assert.equal(calls, 2);
+  assert.equal(saved.requests.length, 1);
+  assert.deepEqual(loads.map((load) => load[2]), Array(6).fill(input.changes.headSha));
+  assert.deepEqual(await evidence.restore(saved, payload, assertCurrent), result);
+  assert.equal(loads.length, 6);
+});
+
+test("병렬 묶음에서 같은 파일을 요청하면 동일 SHA 원문 조회를 공유한다", async () => {
+  const source = Promise.withResolvers();
+  let loads = 0;
+  const evidence = new ReviewEvidence(evidenceInput().changes, { file() { loads++; return source.promise; } });
+  const assertCurrent = () => {};
+  const request = { path: "src/unchanged.js", side: "head", startLine: 1, endLine: 1 };
+  const first = evidence.expand([request], assertCurrent);
+  const second = evidence.expand([{ ...request, startLine: 2, endLine: 2 }], assertCurrent);
+  assert.equal(loads, 1);
+  source.resolve("first\nsecond\n");
+  assert.deepEqual((await Promise.all([first, second])).map((part) => part.added[0].lines[0]), ["1 | first", "2 | second"]);
 });
 
 test("범위를 벗어난 줄은 같은 묶음만 교정하고 검증된 묶음의 결과는 재사용한다", async (t) => {
@@ -479,17 +570,20 @@ test("141개 파일의 15개 검토 뒤 모든 연동 조합과 종합을 문자
   assert.equal(calls.length, count, "Completed file, link and synthesis receipts must all resume.");
 });
 
-test("연동 검토에서 새로 확인한 지적을 종합·재개 결과에 유지한다", async (t) => {
-  const { review, calls } = await setupLinks(t, (payload) => {
+test("병렬 연동 검토에서 확인한 지적을 종합·재개 결과에 유지한다", { timeout: 3000 }, async (t) => {
+  const secondPairStarted = Promise.withResolvers();
+  const { review, calls } = await setupLinks(t, async (payload) => {
     if (payload.reviewPartition.integrationMode === "group_pair" && payload.reviewPartition.batchIndex === 1) {
+      await secondPairStarted.promise;
       return reviewResult(payload, { findings: [findingFor(payload)] });
     }
+    if (payload.reviewPartition.integrationMode === "group_pair" && payload.reviewPartition.batchIndex === 2) secondPairStarted.resolve();
     if (payload.reviewPartition.phase === "synthesis") return reviewResult(payload, {
       findings: payload.reviewPartition.priorFindings,
       resolutions: payload.reviewPartition.priorFindings.map((finding) => resolutionFor(finding, "retained")),
     });
     return reviewResult(payload);
-  });
+  }, { concurrency: 3 });
   const input = largeInput();
   const result = await review.review(input);
   assert.equal(result.verdict, "hold");

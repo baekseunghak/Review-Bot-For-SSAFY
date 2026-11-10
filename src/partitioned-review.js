@@ -118,22 +118,29 @@ function validateAudit(result, files, phase, candidates = [], evidenceMode = fal
 }
 
 export class PartitionedReviewRunner {
-  constructor({ runner, dataDir, gitlab, thresholdBytes = 1_000_000, batchBytes = 1_000_000, maxFilesPerBatch = 12 }) {
-    Object.assign(this, { runner, dataDir, gitlab, thresholdBytes, batchBytes, maxFilesPerBatch });
+  constructor({ runner, dataDir, gitlab, thresholdBytes = 1_000_000, batchBytes = 1_000_000, maxFilesPerBatch = 12, concurrency = 3 }) {
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 3) fail("review_partition_invalid");
+    Object.assign(this, { runner, dataDir, gitlab, thresholdBytes, batchBytes, maxFilesPerBatch, concurrency });
     this.maxInputBytes = runner.maxInputBytes ?? 2 * 1024 * 1024;
     this.maxInputCharacters = runner.maxInputCharacters ?? Infinity;
   }
 
-  async review(input, { signal, assertCurrent = () => {}, onProgress = () => {} } = {}) {
+  async review(input, { signal, assertCurrent: checkCurrent = () => {}, onProgress = () => {} } = {}) {
+    const stop = new AbortController();
+    const reviewSignal = this.concurrency === 1 ? signal : signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
+    const assertCurrent = () => {
+      checkCurrent();
+      if (signal?.aborted || stop.signal.aborted) fail("runner_cancelled");
+    };
     const evidence = this.gitlab ? new ReviewEvidence(input.changes, this.gitlab) : null;
     const project = (payload) => evidence && !payload.codeEvidence ? evidence.project(payload) : payload;
     const validationInput = (payload) => evidence ? { ...payload, changes: { ...payload.changes, files: undefined } } : payload;
     const run = async (payload) => {
-      try { return await this.runner.review(payload, { signal }); }
+      try { return await this.runner.review(payload, { signal: reviewSignal }); }
       catch (error) {
-        if (error?.code !== "review_locations_invalid" || signal?.aborted) throw error;
+        if (error?.code !== "review_locations_invalid" || reviewSignal?.aborted) throw error;
         assertCurrent();
-        return this.runner.review(payload, { signal, repairLocations: true });
+        return this.runner.review(payload, { signal: reviewSignal, repairLocations: true });
       }
     };
     const fits = (payload, byteLimit = this.maxInputBytes) => {
@@ -164,7 +171,7 @@ export class PartitionedReviewRunner {
     const root = join(this.dataDir, "review-parts");
     const directory = join(root, planId);
     for (const path of [root, directory]) { await mkdir(path, { recursive: true, mode: 0o700 }); if ((await lstat(path)).isSymbolicLink()) fail("review_receipt_invalid"); }
-    const checkpoint = async (progress) => { assertCurrent(); if (signal?.aborted) fail("runner_cancelled"); await onProgress({ planId, fileCount: files.length, ...progress }); };
+    const checkpoint = async (progress) => { assertCurrent(); await onProgress({ planId, fileCount: files.length, ...progress }); };
     // Prior automated reviews remain in private history, without recursively repeating their bodies in every pass.
     const commonChanges = { ...input.changes, notes: (input.changes.notes ?? []).filter((note) => !note.body.includes("<!-- reviewbot:")) };
     const makeInput = (selected, phase, index, total, reports = [], findings = []) => ({ ...input,
@@ -197,18 +204,23 @@ export class PartitionedReviewRunner {
       assertCurrent(); await writeFile(planPath, JSON.stringify(plan), { flag: "wx", mode: 0o600 });
     }
     const reports = [], findings = [];
-    const receipt = async (name, payload, validate) => {
-      const path = join(directory, `${name}.json`), payloadHash = reviewDigest(project(payload));
+    const restoreReceipt = async ({ name, payload, validate }) => {
+      const path = join(directory, `${name}.json`);
       assertCurrent();
+      let info;
       try {
-        const info = await lstat(path);
-        if (!info.isFile() || info.isSymbolicLink() || info.size > 1_000_000) fail("review_receipt_invalid");
-        const saved = JSON.parse(await readFile(path, "utf8"));
-        if (saved.planId !== planId || saved.payloadHash !== payloadHash || saved.resultHash !== hash(saved.result)) fail("review_receipt_invalid");
-        const source = evidence ? await evidence.restore(saved.result, payload, assertCurrent) : saved.result;
-        const restored = normalizeRunnerEnvelope(source, validationInput(payload));
-        validate(restored); return restored;
-      } catch (error) { if (error.code !== "ENOENT") throw error; }
+        info = await lstat(path);
+      } catch (error) { if (error.code === "ENOENT") return null; throw error; }
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 1_000_000) fail("review_receipt_invalid");
+      const saved = JSON.parse(await readFile(path, "utf8"));
+      if (saved.planId !== planId || saved.payloadHash !== reviewDigest(project(payload)) || saved.resultHash !== hash(saved.result)) fail("review_receipt_invalid");
+      const source = evidence ? await evidence.restore(saved.result, payload, assertCurrent) : saved.result;
+      const restored = normalizeRunnerEnvelope(source, validationInput(payload));
+      validate(restored); return restored;
+    };
+    const saveReceipt = async ({ name, payload, validate }) => {
+      assertCurrent();
+      const path = join(directory, `${name}.json`), payloadHash = reviewDigest(project(payload));
       const { result, saved } = await evaluate(payload); validate(result); assertCurrent();
       const stored = saved ?? result;
       const encoded = JSON.stringify({ planId, payloadHash, resultHash: hash(stored), result: stored });
@@ -216,11 +228,47 @@ export class PartitionedReviewRunner {
       await writeFile(path, encoded, { flag: "wx", mode: 0o600 });
       return result;
     };
-    await checkpoint({ phase: "files", totalBatches: batches.length, completedBatches: 0 });
+    const receipt = async (name, payload, validate) => {
+      const work = { name, payload, validate };
+      return (await restoreReceipt(work)) ?? await saveReceipt(work);
+    };
+    const reviewParts = async (count, makeWork, reportProgress) => {
+      const results = new Array(count), pending = [];
+      let completed = 0;
+      await reportProgress(completed);
+      // Revalidate saved evidence before new work can fill the shared source cache.
+      for (let index = 0; index < count; index++) {
+        const restored = await restoreReceipt(makeWork(index));
+        if (!restored) pending.push(index);
+        else { results[index] = restored; await reportProgress(++completed); }
+      }
+      let next = 0, failure;
+      let progress = Promise.resolve();
+      const lane = async () => {
+        while (!stop.signal.aborted && next < pending.length) {
+          const index = pending[next++];
+          try {
+            results[index] = await saveReceipt(makeWork(index));
+            const done = ++completed;
+            progress = progress.then(() => reportProgress(done));
+            await progress;
+          } catch (error) {
+            if (!stop.signal.aborted) { failure = error; stop.abort(); }
+            return;
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(this.concurrency, pending.length) }, lane));
+      if (stop.signal.aborted) throw failure;
+      assertCurrent();
+      return results;
+    };
+    const batchResults = await reviewParts(batches.length, (index) => ({ name: `batch-${index + 1}`,
+      payload: makeInput(batches[index], "files", index + 1, batches.length),
+      validate: (value) => validateAudit(value, batches[index], "files", [], Boolean(evidence)),
+    }), (completedBatches) => checkpoint({ phase: "files", totalBatches: batches.length, completedBatches }));
     for (let index = 0; index < batches.length; index++) {
-      const payload = makeInput(batches[index], "files", index + 1, batches.length);
-      const result = await receipt(`batch-${index + 1}`, payload,
-        (value) => validateAudit(value, batches[index], "files", [], Boolean(evidence)));
+      const result = batchResults[index];
       const prefix = `b${String(index + 1).padStart(3, "0")}`;
       const qualified = result.reviewAudit.findings.map((finding) => ({ ...finding, id: `${prefix}:${finding.id}` }));
       let qualifiedBody = result.body;
@@ -228,7 +276,6 @@ export class PartitionedReviewRunner {
       findings.push(...qualified);
       reports.push({ batchId: prefix, files: batches[index].map(filePath), verdict: result.verdict,
         body: qualifiedBody, memory: result.memory, interfaces: result.reviewAudit.interfaces, findings: qualified });
-      await checkpoint({ phase: "files", totalBatches: batches.length, completedBatches: index + 1 });
     }
     const integrationFiles = files.map((file) => ({ ...file, diff: "", baseContent: file.deletedFile ? file.baseContent : null }));
     const compact = (payload) => {
@@ -274,22 +321,24 @@ export class PartitionedReviewRunner {
         const selected = selectedFor(pair);
         if (!fits(pairPayload(selected, candidatesFor(selected), 999999))) fail("review_integration_too_large");
       }
-      const integrationReports = [];
-      const candidates = [...findings];
-      for (let index = 0; index < pairs.length; index++) {
+      const pairResults = await reviewParts(pairs.length, (index) => {
+        const [left, right] = pairs[index];
         const selected = selectedFor(pairs[index]), prior = candidatesFor(selected);
-        const pairInput = pairPayload(selected, prior, index + 1);
-        await checkpoint({ phase: "integration", totalBatches: batches.length, completedBatches: batches.length,
-          integrationGroups: groups.length, totalIntegrationPairs: pairs.length, completedIntegrationPairs: index });
-        const result = await receipt(`links-v1-${pairs[index][0]}-${pairs[index][1]}`, pairInput, (value) => {
-          validateAudit(value, selected, "integration", prior, Boolean(evidence));
-          for (const finding of value.reviewAudit.findings) {
-            const original = prior.find((item) => item.id === finding.id);
-            if (original ? !sameLocation(original, finding) : finding.id.includes(":")) {
-              fail("review_audit_invalid");
+        return {
+          name: `links-v1-${left}-${right}`, payload: pairPayload(selected, prior, index + 1),
+          validate: (value) => {
+            validateAudit(value, selected, "integration", prior, Boolean(evidence));
+            for (const finding of value.reviewAudit.findings) {
+              const original = prior.find((item) => item.id === finding.id);
+              if (original ? !sameLocation(original, finding) : finding.id.includes(":")) fail("review_audit_invalid");
             }
-          }
-        });
+          },
+        };
+      }, (completedIntegrationPairs) => checkpoint({ phase: "integration", totalBatches: batches.length, completedBatches: batches.length,
+        ...integrationDetails, completedIntegrationPairs }));
+      const candidates = [...findings];
+      const integrationReports = pairResults.map((result, index) => {
+        const selected = selectedFor(pairs[index]), prior = candidatesFor(selected);
         const known = new Set(prior.map((finding) => finding.id));
         const qualified = result.reviewAudit.findings.map((finding) => {
           if (known.has(finding.id)) return finding;
@@ -297,9 +346,9 @@ export class PartitionedReviewRunner {
           candidates.push(added);
           return added;
         });
-        integrationReports.push({ groupPair: pairs[index], files: selected.map(filePath), verdict: result.verdict,
-          memory: result.memory, findings: qualified, resolutions: result.reviewAudit.resolutions });
-      }
+        return { groupPair: pairs[index], files: selected.map(filePath), verdict: result.verdict,
+          memory: result.memory, findings: qualified, resolutions: result.reviewAudit.resolutions };
+      });
       payload = compact(makeInput([], "synthesis", pairs.length + 1, batches.length, reports, candidates));
       payload.reviewPartition.requiredPaths = files.map(filePath);
       payload.reviewPartition.fullManifest = manifest.map(({ path }) => ({ path }));

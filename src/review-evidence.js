@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import { UserError } from "./core.js";
 import { canonicalMrUrl } from "./gitlab-context.js";
 
@@ -6,7 +7,7 @@ export const REVIEW_EVIDENCE_VERSION = 1;
 const CONTEXT_LINES = 8;
 const MAX_SPAN = 32;
 const MAX_ROUNDS = 2;
-const MAX_REQUESTS = 4;
+export const MAX_CONTEXT_REQUESTS = 8;
 const MAX_EXTRA_FILES = 24;
 const MAX_EXTRA_BYTES = 8_000_000;
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
@@ -130,8 +131,50 @@ export class ReviewEvidence {
       codeEvidence, remainingContextRounds: synthesis ? 0 : MAX_ROUNDS };
   }
 
+  nearbyContext(input, projected) {
+    if (input.reviewPartition?.phase !== "files") return [];
+    const paths = new Set(input.changes.files.map((file) => file.newPath));
+    const directories = new Set([...paths].map((path) => posix.dirname(path)));
+    const names = new Set(projected.codeEvidence.filter((entry) => entry.side === "head")
+      .flatMap((entry) => entry.lines.flatMap((line) => line.match(/[A-Za-z_$][\w$-]{2,}/g) ?? [])));
+    const candidates = [];
+    for (const [path, lines] of this.sources.head) {
+      if (!lines.length || paths.has(path) || this.excluded.has(path)) continue;
+      const { dir, name } = posix.parse(path);
+      const score = (names.has(name) ? 2 : 0) + Number(directories.has(dir || "."));
+      if (score) candidates.push({ path, lines, score });
+    }
+    candidates.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path, "en"));
+    // shortcut: only collected companion files, up to 96 lines each, until precise symbol lookup is needed.
+    const requests = [];
+    let bytes = 0;
+    for (const { path, lines } of candidates.slice(0, 3)) {
+      for (let startLine = 1; startLine <= Math.min(lines.length, 96) && requests.length < MAX_CONTEXT_REQUESTS; startLine += MAX_SPAN) {
+        const endLine = Math.min(startLine + MAX_SPAN - 1, lines.length);
+        const size = Buffer.byteLength(lines.slice(startLine - 1, endLine).join("\n"));
+        if (bytes + size > 32_768) break;
+        bytes += size;
+        requests.push({ path, side: "head", startLine, endLine });
+      }
+    }
+    return requests;
+  }
+
+  async loadSource(path, side) {
+    let source;
+    try { source = await this.gitlab.file(this.changes.projectId, path, this.changes[`${side}Sha`]); }
+    catch (error) {
+      if (error?.httpStatus !== 404 && !["unsupported_content", "context_too_large"].includes(error?.code)) throw error;
+    }
+    if (typeof source !== "string") return null;
+    const size = Buffer.byteLength(source);
+    if (this.extraBytes + size > MAX_EXTRA_BYTES) return null;
+    this.extraBytes += size;
+    return linesOf(source);
+  }
+
   async expand(requests, assertCurrent) {
-    if (!Array.isArray(requests) || requests.length < 1 || requests.length > MAX_REQUESTS) invalid();
+    if (!Array.isArray(requests) || requests.length < 1 || requests.length > MAX_CONTEXT_REQUESTS) invalid();
     const added = [], unavailable = [], fulfilled = [];
     for (const request of requests) {
       const { path, side, startLine, endLine } = request ?? {};
@@ -140,21 +183,12 @@ export class ReviewEvidence {
         || !Number.isSafeInteger(endLine) || startLine < 1 || endLine < startLine || endLine - startLine >= MAX_SPAN) invalid();
       assertCurrent();
       let lines = this.sources[side].get(path);
-      const key = `${side}:${path}`;
+      const key = `${this.changes[`${side}Sha`]}:${path}`;
       if (!lines && !this.excluded.has(path)) {
         if (!this.extra.has(key) && this.extra.size < MAX_EXTRA_FILES) {
-          let source;
-          try { source = await this.gitlab.file(this.changes.projectId, path, this.changes[`${side}Sha`]); }
-          catch (error) {
-            if (error?.httpStatus !== 404 && !["unsupported_content", "context_too_large"].includes(error?.code)) throw error;
-          }
-          const size = typeof source === "string" ? Buffer.byteLength(source) : 0;
-          if (typeof source === "string" && this.extraBytes + size <= MAX_EXTRA_BYTES) {
-            this.extraBytes += size;
-            this.extra.set(key, linesOf(source));
-          } else this.extra.set(key, null);
+          this.extra.set(key, this.loadSource(path, side));
         }
-        lines = this.extra.get(key);
+        lines = await this.extra.get(key);
       }
       assertCurrent();
       if (!lines || endLine > lines.length) { unavailable.push({ path, side, startLine, endLine }); continue; }
@@ -166,13 +200,23 @@ export class ReviewEvidence {
 
   async evaluate(input, run, { assertCurrent, fits }) {
     const projected = this.project(input);
+    const supplied = new Map(projected.codeEvidence.map((entry) => [entry.id, entry]));
     const requests = [];
+    projected.contextRequestLimit = MAX_CONTEXT_REQUESTS;
+    if (!fits(projected)) delete projected.contextRequestLimit;
+    let prefetched = this.nearbyContext(input, projected);
+    if (prefetched.length) {
+      const { added } = await this.expand(prefetched, assertCurrent);
+      projected.codeEvidence = [...supplied.values(), ...added];
+      if (!fits(projected)) { prefetched = []; projected.codeEvidence = [...supplied.values()]; }
+    }
     for (let round = 0; ;) {
       assertCurrent();
       const response = await run(projected);
       if (!Array.isArray(response?.contextRequests) || Object.keys(response).some((key) => key !== "review" && key !== "contextRequests")) invalid();
       if (response.review && response.contextRequests.length === 0) {
-        try { return { result: this.render(response.review, projected), saved: { review: response.review, requests } }; }
+        try { return { result: this.render(response.review, projected), saved: { review: response.review, requests,
+          ...(prefetched.length ? { prefetched } : {}) } }; }
         catch (error) {
           if (error.code !== "review_evidence_invalid" || projected.invalidCodeEvidence) throw error;
           projected.invalidCodeEvidence = true;
@@ -183,9 +227,11 @@ export class ReviewEvidence {
       if (response.review !== null || round >= MAX_ROUNDS || input.reviewPartition?.phase === "synthesis") invalid();
       const { added, unavailable, fulfilled } = await this.expand(response.contextRequests, assertCurrent);
       requests.push(fulfilled);
+      for (const entry of added) supplied.set(entry.id, entry);
       projected.codeEvidence = [...new Map([...projected.codeEvidence, ...added].map((entry) => [entry.id, entry])).values()];
-      projected.unavailableCodeContext = unavailable;
+      projected.unavailableCodeContext = [...(projected.unavailableCodeContext ?? []), ...unavailable];
       projected.remainingContextRounds = MAX_ROUNDS - ++round;
+      if (!fits(projected) && prefetched.length) { prefetched = []; projected.codeEvidence = [...supplied.values()]; }
       if (!fits(projected)) invalid("input_too_large");
     }
   }
@@ -194,7 +240,9 @@ export class ReviewEvidence {
     const projected = this.project(input);
     if (!Array.isArray(saved?.requests) || saved.requests.length > MAX_ROUNDS
       || (input.reviewPartition?.phase === "synthesis" && saved.requests.length)) invalid("review_receipt_invalid");
-    for (const requests of saved.requests) {
+    if (saved.prefetched !== undefined && (input.reviewPartition?.phase !== "files" || !Array.isArray(saved.prefetched)
+      || saved.prefetched.some((request) => request?.side !== "head" || !this.sources.head.has(request.path)))) invalid("review_receipt_invalid");
+    for (const requests of [saved.prefetched ?? [], ...saved.requests]) {
       if (!Array.isArray(requests)) invalid("review_receipt_invalid");
       if (!requests.length) continue;
       const { added, unavailable } = await this.expand(requests, assertCurrent);
