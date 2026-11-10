@@ -337,7 +337,7 @@ register("message_preview", {
 }, ({ convention_name, variables }) => service.previewMessage({ conventionName: convention_name, variables }));
 
 register("message_send", {
-  description: "Send one rendered convention or direct text to saved logical channels. Review requests/completions must use review-request/review-complete, never direct text.",
+  description: "Send one rendered convention or direct text to saved logical channels. Review requests, completions and failures require a review convention.",
   inputSchema: z.object({
     channel_names: z.array(name).min(1).max(20),
     convention_name: name.optional(),

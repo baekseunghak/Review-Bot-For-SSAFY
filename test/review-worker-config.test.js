@@ -110,3 +110,18 @@ test("notifications use the configured webhook for the mapped author's DM and co
   const unlinked = f.notifier.prepare({ ...f.input, issueKeys: [] });
   assert.equal(unlinked.variables.jira_key, "미연결");
 });
+
+test("failure DMs use the built-in template and fall back to the registered self account for an unmapped author", async (t) => {
+  const f = fixture(t);
+  const failure = { ...f.input, requestId: 123, stage: "reviewing", errorCode: "unsupported_content", reason: "지원하지 않는 파일 형식" };
+  assert.throws(() => f.notifier.prepareFailure(failure), { code: "notification_setup_missing" });
+  f.service.createParticipant({ displayName: "Operator", mattermostUsername: "operator.mm", isSelf: true });
+  await f.notifier.send(f.notifier.prepareFailure(failure));
+  f.service.createParticipant({ displayName: "Fixture author", mattermostUsername: "author.mm", gitlabUsername: "author.gitlab" });
+  await f.notifier.send(f.notifier.prepareFailure(failure));
+  assert.deepEqual(f.calls.map((call) => call.channel), ["@operator.mm", "@author.mm"]);
+  assert.match(f.calls[1].text, /^@author\.mm :warning: !7 /);
+  assert.match(f.calls[1].text, /자동 검토 실패.*#123.*reviewing.*unsupported_content/);
+  assert.ok(f.calls[1].text.includes(f.input.mrUrl));
+  assert.ok(!f.calls[1].text.includes(f.input.commentUrl));
+});

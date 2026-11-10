@@ -7,6 +7,7 @@ import { resolveDataDir, UserError } from "./core.js";
 const ACTIONS = new Set(["open", "update", "close", "reopen", "merge", "approval", "approved", "unapproval", "unapproved"]);
 const STATES = new Set(["opened", "closed", "merged", "locked"]);
 const USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$/;
+const FAILURE_NOTIFICATION_STAGES = new Set(["queued", "reviewing", "validating", "reviewed", "posting"]);
 const ERROR_MESSAGES = new Map(Object.entries({
   review_coverage_invalid: "분할 검토의 파일 완료 목록이 전체 목록과 일치하지 않아 게시를 중단했습니다.",
   review_audit_invalid: "분할 검토의 지적·근거·완료 기록이 검증을 통과하지 못했습니다.",
@@ -30,6 +31,8 @@ const ERROR_MESSAGES = new Map(Object.entries({
   runner_exit_failed: "리뷰 CLI가 비정상 종료했습니다. 인증·지원 인수·사용 한도 등의 추가 확인이 필요합니다.",
   runner_response_invalid: "완료된 구조화 응답을 확인하지 못했습니다. 이벤트 형식·완료 여부·JSON 해석 검사가 실패했습니다.",
   unsupported_content: "자동 검토를 지원하지 않는 파일 형식·인코딩·서브모듈 변경이 포함되어 있습니다.",
+  incomplete_context: "검토에 필요한 MR 자료를 모두 확보하지 못했습니다.",
+  gitlab_request_failed: "GitLab 자료 요청에 실패했습니다. 연결 상태와 접근 권한을 확인하세요.",
   no_reviewable_text: "검토할 코드·텍스트 파일이 없습니다. 제외된 이미지나 PDF 테스트 픽스처는 별도 검토가 필요합니다.",
   review_result_invalid: "리뷰 결과의 최상위 JSON 구조가 요구 형식과 다릅니다.",
   review_body_invalid: "리뷰 본문이 공개 가능한 내용과 길이 규칙을 충족하지 못했습니다.",
@@ -40,6 +43,10 @@ const ERROR_MESSAGES = new Map(Object.entries({
   review_test_claim_invalid: "직접 실행하지 않은 검증의 성공·실패를 직접 확인한 결과로 기록했습니다.",
   verification_receipt_invalid: "저장된 실행 검증 영수증이 없거나 변경됐습니다. 원본 파일과 해시를 확인한 뒤 조치하세요.",
 }));
+
+function errorMessage(code) {
+  return ERROR_MESSAGES.get(code) ?? "추가 진단이 필요한 처리 오류입니다. 오류 코드와 단계를 확인하세요.";
+}
 
 function invalid() {
   throw new UserError("Invalid review webhook data.");
@@ -257,6 +264,10 @@ export class ReviewInbox {
         error_code TEXT,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS review_failure_notifications (
+        request_id INTEGER PRIMARY KEY REFERENCES review_requests(id),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'unavailable', 'skipped', 'unknown'))
+      );
     `);
     try { chmodSync(join(directory, "reviews.sqlite3"), 0o600); } catch { /* Windows uses inherited ACLs. */ }
   }
@@ -464,9 +475,46 @@ export class ReviewInbox {
       this.db.prepare(`UPDATE review_executions SET status = ?, lease_token = NULL, lease_expires_at = NULL,
         next_attempt_at = ?, error_code = ?, updated_at = ? WHERE request_id = ?`)
         .run(status, status === "retry" ? nextAt : null, errorCode, at, requestId);
+      if (status === "failed" && FAILURE_NOTIFICATION_STAGES.has(row.stage)) {
+        this.db.prepare(`INSERT INTO review_failure_notifications VALUES (?, 'pending') ON CONFLICT(request_id) DO NOTHING`).run(requestId);
+      }
       this.db.exec("COMMIT");
       return { status, nextAttemptAt: status === "retry" ? nextAt : null };
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  pendingFailureNotification(requestId = null) {
+    const allowed = [...this.projectIds];
+    if (!allowed.length) return null;
+    const row = this.db.prepare(`SELECT r.id AS requestId, r.project_id AS projectId, r.mr_iid AS mrIid,
+      r.head_sha AS headSha, e.stage, e.error_code AS errorCode,
+      (r.status = 'pending' AND m.state = 'opened' AND m.draft = 0 AND r.head_sha = m.head_sha) AS current
+      FROM review_failure_notifications n JOIN review_executions e USING(request_id)
+      JOIN review_requests r ON r.id = e.request_id
+      JOIN review_merge_requests m ON m.project_id = r.project_id AND m.mr_iid = r.mr_iid
+      WHERE e.status = 'failed' AND n.status = 'pending'
+        AND (? IS NULL OR r.id = ?) AND r.project_id IN (${allowed.map(() => "?").join(",")})
+      ORDER BY r.id LIMIT 1`).get(requestId, requestId, ...allowed);
+    return row ? { ...row, current: Boolean(row.current) && FAILURE_NOTIFICATION_STAGES.has(row.stage), reason: errorMessage(row.errorCode) } : null;
+  }
+
+  claimFailureNotification({ requestId, stage, errorCode }, outcome) {
+    if (!["unknown", "unavailable", "skipped"].includes(outcome)) throw new UserError("Invalid failure notification outcome.");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const pending = this.pendingFailureNotification(requestId);
+      const matches = pending !== null && pending.stage === stage && pending.errorCode === errorCode;
+      if (matches) {
+        this.db.prepare("UPDATE review_failure_notifications SET status = ? WHERE request_id = ?")
+          .run(pending.current ? outcome : "skipped", requestId);
+      }
+      this.db.exec("COMMIT");
+      return matches && (outcome !== "unknown" || pending.current);
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  confirmFailureNotification(requestId) {
+    this.db.prepare("UPDATE review_failure_notifications SET status = 'sent' WHERE request_id = ? AND status = 'unknown'").run(requestId);
   }
 
   retryFailed(requestId, { allowNotificationDuplicate = false, now = new Date() } = {}) {
@@ -527,15 +575,22 @@ export class ReviewInbox {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new UserError("limit must be an integer between 1 and 100.");
     const counts = { running: 0, retry: 0, completed: 0, failed: 0 };
     for (const row of this.db.prepare("SELECT status, COUNT(*) AS count FROM review_executions GROUP BY status").all()) counts[row.status] = Number(row.count);
-    const jobs = this.db.prepare(`SELECT request_id, stage, status, attempts, error_code, next_attempt_at, artifact
-      FROM review_executions ORDER BY updated_at DESC, request_id DESC LIMIT ?`).all(limit).map((row) => ({
-      requestId: Number(row.request_id), stage: row.stage, status: row.status,
-      attempt: Number(row.attempts), lastErrorCode: row.error_code,
-      lastErrorMessage: row.error_code ? ERROR_MESSAGES.get(row.error_code) ?? "추가 진단이 필요한 처리 오류입니다. 오류 코드와 단계를 확인하세요." : null,
-      nextAttemptAt: row.next_attempt_at,
-      ...(JSON.parse(row.artifact).partitionedReview ? { partitionedReview: JSON.parse(row.artifact).partitionedReview } : {}),
-      ...(JSON.parse(row.artifact).contextSizeError ? { contextSizeError: JSON.parse(row.artifact).contextSizeError } : {}),
-    }));
+    const jobs = this.db.prepare(`SELECT e.request_id, e.stage, e.status, e.attempts, e.error_code, e.next_attempt_at, e.artifact,
+        n.status AS failureNotification
+      FROM review_executions e LEFT JOIN review_failure_notifications n USING(request_id)
+      ORDER BY e.updated_at DESC, e.request_id DESC LIMIT ?`).all(limit).map((row) => {
+      const { partitionedReview, contextSizeError } = JSON.parse(row.artifact);
+      const { failureNotification } = row;
+      return {
+        requestId: Number(row.request_id), stage: row.stage, status: row.status,
+        attempt: Number(row.attempts), lastErrorCode: row.error_code,
+        lastErrorMessage: row.error_code ? errorMessage(row.error_code) : null,
+        nextAttemptAt: row.next_attempt_at,
+        ...(partitionedReview ? { partitionedReview } : {}),
+        ...(contextSizeError ? { contextSizeError } : {}),
+        ...(failureNotification && (failureNotification !== "pending" || row.status === "failed") ? { failureNotification } : {}),
+      };
+    });
     return { counts, jobs };
   }
 

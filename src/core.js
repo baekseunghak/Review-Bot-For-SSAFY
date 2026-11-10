@@ -11,8 +11,10 @@ const REVIEW_CONVENTIONS = new Map([
   ["review-request", ":merge_please:"],
   ["review-request-multi", ":merge_please:"],
   ["review-complete", ":review_complete_shake:"],
+  ["review-failed", ":warning:"],
 ]);
-const REVIEW_TEXT_PATTERN = /(?:리뷰(?:를)?\s*(?:요청|완료|부탁)|검토\s*부탁|\breview\s+(?:request|requested|complete|completed|please)\b)/iu;
+const REVIEW_FAILURE_TEMPLATE = "{{mention}} :warning: !{{mr_number}} | [{{jira_key}}] {{message}}";
+const REVIEW_TEXT_PATTERN = /(?:리뷰(?:를)?\s*(?:요청|완료|부탁|실패)|검토\s*(?:부탁|실패)|\breview\s+(?:request|requested|complete|completed|please|failed)\b)/iu;
 
 export class UserError extends Error {}
 
@@ -529,9 +531,9 @@ export class MattermostService {
   }
 
   previewMessage({ conventionName, variables = {} }) {
-    const convention = this.#convention(conventionName);
-    if (!convention) throw new UserError(`Convention '${conventionName}' does not exist.`);
-    const text = renderTemplate(convention.template, variables);
+    const template = this.#convention(conventionName)?.template ?? (conventionName === "review-failed" ? REVIEW_FAILURE_TEMPLATE : null);
+    if (template === null) throw new UserError(`Convention '${conventionName}' does not exist.`);
+    const text = renderTemplate(template, variables);
     assertReviewMessage(conventionName, variables, text);
     return { conventionName, text };
   }
@@ -604,7 +606,7 @@ export class MattermostService {
 
   #messageText({ conventionName, variables, text }) {
     if (!conventionName && REVIEW_TEXT_PATTERN.test(text ?? "")) {
-      throw new UserError("Review messages must use convention_name 'review-request' or 'review-complete'; direct text is not allowed.");
+      throw new UserError("Review messages must use convention_name; direct text is not allowed.");
     }
     const rendered = conventionName ? this.previewMessage({ conventionName, variables }).text : text;
     if (!rendered) throw new UserError("Provide convention_name or text.");

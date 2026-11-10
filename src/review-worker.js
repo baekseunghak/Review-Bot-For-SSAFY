@@ -24,8 +24,38 @@ export class ReviewWorker {
   runOnce({ requestId } = {}) {
     if (this.task) return Promise.resolve({ status: "busy" });
     const claimed = requestId === undefined ? undefined : this.inbox.claimFailedForRun(requestId, { now: this.now(), leaseMs: this.leaseMs });
-    this.task = this.#run(claimed).then((result) => { this.lastResult = result; return result; }).finally(() => { this.task = null; });
+    this.task = this.#run(claimed).then(async (result) => {
+      if (result.status === "failed") await this.#deliverFailureNotification(result.requestId);
+      else if (!claimed) await this.#deliverFailureNotification();
+      this.lastResult = result;
+      return result;
+    }).finally(() => { this.task = null; });
     return this.task;
+  }
+
+  async #deliverFailureNotification(requestId) {
+    if (!this.notifier.prepareFailure) return;
+    try {
+      const notice = this.inbox.pendingFailureNotification(requestId);
+      if (!notice) return;
+      let payload;
+      let outcome = "skipped";
+      if (notice.current) {
+        try {
+          const head = await this.gitlab.readHead(notice);
+          this.#assertHead(head, notice.headSha);
+          payload = this.notifier.prepareFailure({ ...head, ...notice });
+          outcome = "unknown";
+        } catch (error) {
+          if (!OBSOLETE.has(error?.code)) outcome = "unavailable";
+        }
+      }
+      // Persist the claim before sending, so an uncertain delivery cannot be sent twice.
+      if (this.inbox.claimFailureNotification(notice, outcome) && payload) {
+        await this.notifier.send(payload);
+        this.inbox.confirmFailureNotification(notice.requestId);
+      }
+    } catch { /* Preserve the original review failure and the delivery checkpoint. */ }
   }
 
   async #run(claimed) {

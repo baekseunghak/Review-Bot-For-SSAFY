@@ -171,6 +171,73 @@ function fixture(t) {
   };
 }
 
+test("최종 실패에서만 작성자 실패 알림을 보내고 같은 요청 재실행에서는 반복하지 않는다", async (t) => {
+  const f = fixture(t);
+  const notifier = { ...f.notifier, prepareFailure: (notice) => notice };
+  f.hooks.review = () => { throw Object.assign(new Error("PRIVATE_RUNTIME_DETAIL"), { code: "runner_timeout" }); };
+  f.send();
+  const worker = f.makeWorker({ notifier, maxAttempts: 2 });
+  await worker.runOnce();
+  assert.equal(f.inbox.workerStatus().jobs[0].status, "retry");
+  assert.equal(f.calls.notifications.length, 0);
+  f.advance();
+  await worker.runOnce();
+  assert.equal(f.inbox.workerStatus().jobs[0].failureNotification, "sent");
+  assert.equal(f.calls.notifications.length, 1);
+  const [notice] = f.calls.notifications;
+  assert.equal(notice.author.username, "dev.one");
+  assert.equal(notice.mrUrl, MR_URL);
+  assert.equal(notice.requestId, 1);
+  assert.equal(notice.errorCode, "runner_timeout");
+  assert.doesNotMatch(JSON.stringify(notice), /PRIVATE_RUNTIME_DETAIL/);
+  assert.equal(f.notes.length, 0);
+  await f.makeWorker({ notifier, maxAttempts: 1 }).runOnce({ requestId: 1 });
+  assert.equal(f.calls.notifications.length, 1);
+});
+
+test("재시작한 두 worker는 대기 중인 실패 알림을 한 번만 선점하고 불명인 전송을 반복하지 않는다", async (t) => {
+  const f = fixture(t);
+  f.hooks.review = () => { throw Object.assign(new Error("temporary failure"), { code: "runner_timeout" }); };
+  f.send();
+  await f.makeWorker({ maxAttempts: 1 }).runOnce();
+  assert.equal(f.inbox.workerStatus().jobs[0].failureNotification, "pending");
+  f.restart();
+  const notifier = { ...f.notifier, prepareFailure: (notice) => notice };
+  f.hooks.send = () => { throw new Error("Webhook delivery could not be confirmed"); };
+  await Promise.all([f.makeWorker({ notifier }).runOnce(), f.makeWorker({ notifier, inbox: f.secondInbox() }).runOnce()]);
+  assert.equal(f.calls.notifications.length, 1);
+  assert.equal(f.inbox.workerStatus().jobs[0].failureNotification, "unknown");
+  await f.makeWorker({ notifier }).runOnce();
+  assert.equal(f.calls.notifications.length, 1);
+});
+
+test("GitLab에 새 커밋이 올라온 실패 알림은 보내지 않는다", async (t) => {
+  const f = fixture(t);
+  f.hooks.review = () => { throw Object.assign(new Error("temporary failure"), { code: "runner_timeout" }); };
+  f.send();
+  await f.makeWorker({ maxAttempts: 1 }).runOnce();
+  f.changeMr({ sha: NEXT, diff_refs: { head_sha: NEXT, base_sha: BASE, start_sha: "c".repeat(40) } });
+  const notifier = { ...f.notifier, prepareFailure: (notice) => notice };
+  await f.makeWorker({ notifier }).runOnce();
+  assert.equal(f.inbox.workerStatus().jobs[0].failureNotification, "skipped");
+  assert.equal(f.calls.notifications.length, 0);
+});
+
+test("재실행에서 댓글을 게시했다면 이전 검토 실패 알림을 보내지 않는다", async (t) => {
+  const f = fixture(t);
+  f.hooks.review = () => { throw Object.assign(new Error("temporary failure"), { code: "runner_timeout" }); };
+  f.send();
+  await f.makeWorker({ maxAttempts: 1 }).runOnce();
+  delete f.hooks.review;
+  const notifier = { ...f.notifier, prepareFailure: (notice) => notice };
+  f.hooks.send = () => { throw new Error("Completion DM delivery could not be confirmed"); };
+  const result = await f.makeWorker({ notifier }).runOnce({ requestId: 1 });
+  assert.equal(result.code, "notification_unknown");
+  assert.equal(f.notes.length, 1);
+  assert.equal(f.calls.notifications.length, 1);
+  assert.equal(f.inbox.workerStatus().jobs[0].failureNotification, "skipped");
+});
+
 test("자동 worker는 수집한 사람의 리뷰 댓글을 저장한 뒤 같은 실행의 모델 관점에 전달한다", async (t) => {
   const f = fixture(t);
   writeFileSync(join(f.contextService.dataDir, "reviewer-comments-policy.json"), JSON.stringify({ schemaVersion: 1, enabled: true, excludedUserIds: [8], excludedUsernames: [] }));
